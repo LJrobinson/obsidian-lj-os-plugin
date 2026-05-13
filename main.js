@@ -4,6 +4,14 @@ const DEFAULT_SETTINGS = {
   dynoSheetFolder: "LJ OS/stats",
   dailyNoteFolder: "Daily Notes",
   dailySectionHeading: "## 🏁 Git Your Daily",
+  summaryTitle: "🏁 Git Your Daily",
+  repoSectionTitle: "🧰 Repo Garage",
+  tidySectionTitle: "🧹 Tidy-Up Queue",
+  useEmoji: true,
+  showSummary: true,
+  showRepoTable: true,
+  showTidyQueue: true,
+  tableFormat: "standard",
 };
 
 module.exports = class LjOsPlugin extends Plugin {
@@ -95,7 +103,7 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     const existingContent = await this.app.vault.read(dailyNoteFile);
-    const sectionMarkdown = renderDynoSheetMarkdown(dynoSheet, this.settings.dailySectionHeading);
+    const sectionMarkdown = renderDynoSheetMarkdown(dynoSheet, this.settings);
     const updatedContent = upsertSection(existingContent, this.settings.dailySectionHeading, sectionMarkdown);
 
     await this.app.vault.modify(dailyNoteFile, updatedContent);
@@ -114,6 +122,7 @@ class LjOsSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "LJ OS" });
+    containerEl.createEl("h3", { text: "Paths" });
 
     new Setting(containerEl)
       .setName("Dyno sheet folder")
@@ -141,9 +150,13 @@ class LjOsSettingTab extends PluginSettingTab {
           })
       );
 
+    containerEl.createEl("h3", { text: "Labels & Headings" });
+
     new Setting(containerEl)
       .setName("Daily section heading")
-      .setDesc("Exact heading line used to insert or replace the LJ OS section.")
+      .setDesc(
+        "Exact Markdown heading used to find and replace the existing section. Existing users can change \"## LJ OS Daily Dyno Sheet\" to \"## 🏁 Git Your Daily\"."
+      )
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.dailySectionHeading)
@@ -153,61 +166,178 @@ class LjOsSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    containerEl.createEl("p", {
+      text: "This heading is used to find and replace the existing section.",
+    });
+
+    new Setting(containerEl)
+      .setName("Summary callout title")
+      .setDesc("Title shown in the summary callout.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.summaryTitle)
+          .setValue(this.plugin.settings.summaryTitle)
+          .onChange(async (value) => {
+            this.plugin.settings.summaryTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.summaryTitle);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Repository section title")
+      .setDesc("Title shown above the repository table.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.repoSectionTitle)
+          .setValue(this.plugin.settings.repoSectionTitle)
+          .onChange(async (value) => {
+            this.plugin.settings.repoSectionTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.repoSectionTitle);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Tidy-up section title")
+      .setDesc("Title shown above the dirty repo queue.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.tidySectionTitle)
+          .setValue(this.plugin.settings.tidySectionTitle)
+          .onChange(async (value) => {
+            this.plugin.settings.tidySectionTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.tidySectionTitle);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("p", {
+      text: "Emoji mode affects rendered output only. It does not rewrite saved title fields.",
+    });
+    containerEl.createEl("h3", { text: "Display" });
+
+    new Setting(containerEl)
+      .setName("Use emoji")
+      .setDesc("Render built-in labels with emoji. This does not change saved title strings.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.useEmoji !== false).onChange(async (value) => {
+          this.plugin.settings.useEmoji = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show summary")
+      .setDesc("Render the summary callout.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showSummary !== false).onChange(async (value) => {
+          this.plugin.settings.showSummary = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show repository table")
+      .setDesc("Render the repository table section.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showRepoTable !== false).onChange(async (value) => {
+          this.plugin.settings.showRepoTable = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show tidy-up queue")
+      .setDesc("Render the tidy-up queue section.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showTidyQueue !== false).onChange(async (value) => {
+          this.plugin.settings.showTidyQueue = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Table format")
+      .setDesc("Choose how many columns the repository table includes.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("compact", "Compact")
+          .addOption("standard", "Standard")
+          .addOption("detailed", "Detailed")
+          .setValue(normalizeTableFormat(this.plugin.settings.tableFormat))
+          .onChange(async (value) => {
+            this.plugin.settings.tableFormat = normalizeTableFormat(value);
+            await this.plugin.saveSettings();
+          })
+      );
   }
 }
 
-function renderDynoSheetMarkdown(dynoSheet, heading) {
+function renderDynoSheetMarkdown(dynoSheet, settingsOrHeading) {
+  const renderSettings = normalizeRenderSettings(settingsOrHeading);
+  const useEmoji = renderSettings.useEmoji !== false;
   const summary = dynoSheet.summary || {};
   const repos = Array.isArray(dynoSheet.repos) ? dynoSheet.repos : [];
   const dirtyRepos = repos.filter((repo) => Boolean(repo.dirty));
   const reposWithNotes = repos.filter((repo) => hasNotes(repo.notes));
+  const summaryTitle = formatTitle(renderSettings.summaryTitle, DEFAULT_SETTINGS.summaryTitle, useEmoji);
+  const repoSectionTitle = formatTitle(renderSettings.repoSectionTitle, DEFAULT_SETTINGS.repoSectionTitle, useEmoji);
+  const tidySectionTitle = formatTitle(renderSettings.tidySectionTitle, DEFAULT_SETTINGS.tidySectionTitle, useEmoji);
+  const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
+  const showSummary = renderSettings.showSummary !== false;
+  const showRepoTable = renderSettings.showRepoTable !== false;
+  const showTidyQueue = renderSettings.showTidyQueue !== false;
   const lines = [];
+  const blocks = [];
 
-  lines.push((heading || DEFAULT_SETTINGS.dailySectionHeading).trim());
+  lines.push((renderSettings.dailySectionHeading || DEFAULT_SETTINGS.dailySectionHeading).trim());
   lines.push("");
   lines.push(`Generated: ${formatGeneratedAt(dynoSheet.generatedAt)}`);
-  lines.push("");
-  lines.push("> [!summary] 🏁 Git Your Daily");
-  lines.push(`> 🧭 Scanned: **${formatNumber(summary.reposScanned)}** repos`);
-  lines.push(`> 🛠️ Touched: **${formatNumber(summary.reposTouchedToday)}** repos`);
-  lines.push(`> 🏁 Commits: **${formatNumber(summary.commitsToday)}**`);
-  lines.push(`> 🧼 Tidy up: **${formatNumber(summary.dirtyRepos)}** repos`);
-  lines.push(`> 🚀 Unpushed: **${formatNumber(summary.unpushedCommits)}**`);
-  lines.push(`> 📥 Behind remote: **${formatNumber(summary.behindCommits)}**`);
-  lines.push("");
-  lines.push("### 🧰 Repo Garage");
-  lines.push("");
-  lines.push("| Repo | 🌿 Branch | 🏁 Commits | 🧼 Status | 🚀 Unpushed | 📥 Behind | Latest |");
-  lines.push("| --- | --- | ---: | :---: | ---: | ---: | --- |");
 
-  if (repos.length === 0) {
-    lines.push("| No repos included |  | 0 | ✅ Clean | 0 | 0 | No commits yet |");
+  if (showSummary) {
+    blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji));
+  }
+
+  if (showRepoTable) {
+    blocks.push(renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat));
+  }
+
+  if (showTidyQueue) {
+    blocks.push(renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji));
+  }
+
+  if (blocks.length === 0) {
+    lines.push("");
+    lines.push("No LJ OS sections are enabled.");
   } else {
-    for (const repo of repos) {
-      lines.push(
-        [
-          tableCell(repo.name || "Unnamed repo"),
-          tableCell(repo.branch || ""),
-          tableCell(formatNumber(repo.commitsToday)),
-          tableCell(formatRepoStatus(repo.dirty)),
-          tableCell(formatNumber(repo.unpushedCommits)),
-          tableCell(formatNumber(repo.behindUpstream)),
-          tableCell(formatLatestCommit(repo.latestCommit)),
-        ].join(" | ").replace(/^/, "| ") + " |"
-      );
+    for (const block of blocks) {
+      lines.push("");
+      lines.push(...block);
     }
   }
 
-  lines.push("");
-  lines.push("### 🧹 Tidy-Up Queue");
-  lines.push("");
+  return lines.join("\n").trimEnd();
+}
 
-  if (dirtyRepos.length === 0) {
-    lines.push("✅ All scanned repos are clean.");
+function renderSummaryLines(summary, summaryTitle, useEmoji) {
+  return [
+    `> [!summary] ${summaryTitle}`,
+    `> ${maybeEmoji("🧭", `Scanned: **${formatNumber(summary.reposScanned)}** repos`, useEmoji)}`,
+    `> ${maybeEmoji("🛠️", `Touched: **${formatNumber(summary.reposTouchedToday)}** repos`, useEmoji)}`,
+    `> ${maybeEmoji("🏁", `Commits: **${formatNumber(summary.commitsToday)}**`, useEmoji)}`,
+    `> ${maybeEmoji("🧼", `Tidy up: **${formatNumber(summary.dirtyRepos)}** repos`, useEmoji)}`,
+    `> ${maybeEmoji("🚀", `Unpushed: **${formatNumber(summary.unpushedCommits)}**`, useEmoji)}`,
+    `> ${maybeEmoji("📥", `Behind remote: **${formatNumber(summary.behindCommits)}**`, useEmoji)}`,
+  ];
+}
+
+function renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat) {
+  const lines = [`### ${repoSectionTitle}`, "", formatRepoTableHeader(useEmoji, tableFormat), formatRepoTableDivider(tableFormat)];
+
+  if (repos.length === 0) {
+    lines.push(formatEmptyRepoTableRow(useEmoji, tableFormat));
   } else {
-    for (const repo of dirtyRepos) {
-      const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
-      lines.push(`- 🧹 ${formatScalar(repo.name || "Unnamed repo")}${branch}`);
+    for (const repo of repos) {
+      lines.push(formatRepoTableRow(repo, useEmoji, tableFormat));
     }
   }
 
@@ -225,7 +355,23 @@ function renderDynoSheetMarkdown(dynoSheet, heading) {
     }
   }
 
-  return lines.join("\n").trimEnd();
+  return lines;
+}
+
+function renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji) {
+  const lines = [`### ${tidySectionTitle}`, ""];
+
+  if (dirtyRepos.length === 0) {
+    lines.push(maybeEmoji("✅", "All scanned repos are clean.", useEmoji));
+    return lines;
+  }
+
+  for (const repo of dirtyRepos) {
+    const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
+    lines.push(`- ${maybeEmoji("🧹", `${formatScalar(repo.name || "Unnamed repo")}${branch}`, useEmoji)}`);
+  }
+
+  return lines;
 }
 
 function upsertSection(content, heading, sectionMarkdown) {
@@ -308,11 +454,140 @@ function normalizeFolderPath(value) {
   return normalizePath(String(value || "").trim().replace(/^\/+|\/+$/g, ""));
 }
 
+function normalizeRenderSettings(settingsOrHeading) {
+  if (typeof settingsOrHeading === "string") {
+    return Object.assign({}, DEFAULT_SETTINGS, { dailySectionHeading: settingsOrHeading });
+  }
+
+  return Object.assign({}, DEFAULT_SETTINGS, settingsOrHeading || {});
+}
+
+function normalizeTableFormat(value) {
+  return ["compact", "standard", "detailed"].includes(value) ? value : DEFAULT_SETTINGS.tableFormat;
+}
+
+function sanitizeTextSetting(value, fallback) {
+  const text = formatScalar(value);
+  return text || fallback;
+}
+
+function formatTitle(value, fallback, useEmoji) {
+  const title = stripMarkdownHeadingMarkers(value || fallback) || stripMarkdownHeadingMarkers(fallback);
+  return useEmoji ? title : stripLeadingEmoji(title);
+}
+
+function stripMarkdownHeadingMarkers(value) {
+  return formatScalar(value).replace(/^#{1,6}\s+/, "").trim();
+}
+
+function maybeEmoji(icon, text, useEmoji) {
+  return useEmoji ? `${icon} ${text}` : text;
+}
+
+function stripLeadingEmoji(text) {
+  let value = formatScalar(text);
+  const leadingEmojiPattern = /^(?:[\s\uFE0F\u200D]*(?:🏁|🧭|🛠|🧰|🧹|🧼|🚀|📥|✅|🌿)[\s\uFE0F\u200D]*)+/u;
+
+  while (leadingEmojiPattern.test(value)) {
+    value = value.replace(leadingEmojiPattern, "").trimStart();
+  }
+
+  return value;
+}
+
 function formatNumber(value) {
   return Number.isFinite(Number(value)) ? String(Number(value)) : "0";
 }
 
-function formatRepoStatus(value) {
+function formatRepoTableHeader(useEmoji, tableFormat) {
+  if (tableFormat === "compact") {
+    return useEmoji
+      ? "| Repo | 🌿 Branch | 🧼 Status | 🏁 Commits |"
+      : "| Repo | Branch | Status | Commits |";
+  }
+
+  if (tableFormat === "detailed") {
+    return useEmoji
+      ? "| Repo | 🌿 Branch | 🏁 Commits | 🧼 Status | 🚀 Unpushed | 📥 Behind | Latest | Path |"
+      : "| Repo | Branch | Commits | Status | Unpushed | Behind | Latest | Path |";
+  }
+
+  return useEmoji
+    ? "| Repo | 🌿 Branch | 🏁 Commits | 🧼 Status | 🚀 Unpushed | 📥 Behind | Latest |"
+    : "| Repo | Branch | Commits | Status | Unpushed | Behind | Latest |";
+}
+
+function formatRepoTableDivider(tableFormat) {
+  if (tableFormat === "compact") {
+    return "| --- | --- | :---: | ---: |";
+  }
+
+  if (tableFormat === "detailed") {
+    return "| --- | --- | ---: | :---: | ---: | ---: | --- | --- |";
+  }
+
+  return "| --- | --- | ---: | :---: | ---: | ---: | --- |";
+}
+
+function formatEmptyRepoTableRow(useEmoji, tableFormat) {
+  const status = formatRepoStatus(false, useEmoji);
+
+  if (tableFormat === "compact") {
+    return toMarkdownTableRow(["No repos included", "", status, "0"]);
+  }
+
+  if (tableFormat === "detailed") {
+    return toMarkdownTableRow(["No repos included", "", "0", status, "0", "0", "No commits yet", ""]);
+  }
+
+  return toMarkdownTableRow(["No repos included", "", "0", status, "0", "0", "No commits yet"]);
+}
+
+function formatRepoTableRow(repo, useEmoji, tableFormat) {
+  const status = formatRepoStatus(repo.dirty, useEmoji);
+
+  if (tableFormat === "compact") {
+    return toMarkdownTableRow([
+      repo.name || "Unnamed repo",
+      repo.branch || "",
+      status,
+      formatNumber(repo.commitsToday),
+    ]);
+  }
+
+  if (tableFormat === "detailed") {
+    return toMarkdownTableRow([
+      repo.name || "Unnamed repo",
+      repo.branch || "",
+      formatNumber(repo.commitsToday),
+      status,
+      formatNumber(repo.unpushedCommits),
+      formatNumber(repo.behindUpstream),
+      formatLatestCommit(repo.latestCommit),
+      repo.path || "",
+    ]);
+  }
+
+  return toMarkdownTableRow([
+    repo.name || "Unnamed repo",
+    repo.branch || "",
+    formatNumber(repo.commitsToday),
+    status,
+    formatNumber(repo.unpushedCommits),
+    formatNumber(repo.behindUpstream),
+    formatLatestCommit(repo.latestCommit),
+  ]);
+}
+
+function toMarkdownTableRow(cells) {
+  return `| ${cells.map((cell) => tableCell(cell)).join(" | ")} |`;
+}
+
+function formatRepoStatus(value, useEmoji) {
+  if (!useEmoji) {
+    return value ? "Tidy" : "Clean";
+  }
+
   return value ? "🧹 Tidy" : "✅ Clean";
 }
 

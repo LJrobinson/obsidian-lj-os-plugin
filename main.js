@@ -3,7 +3,7 @@ const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath
 const DEFAULT_SETTINGS = {
   dynoSheetFolder: "LJ OS/stats",
   dailyNoteFolder: "Daily Notes",
-  dailySectionHeading: "## LJ OS Daily Dyno Sheet",
+  dailySectionHeading: "## 🏁 Git Your Daily",
 };
 
 module.exports = class LjOsPlugin extends Plugin {
@@ -167,21 +167,21 @@ function renderDynoSheetMarkdown(dynoSheet, heading) {
   lines.push("");
   lines.push(`Generated: ${formatGeneratedAt(dynoSheet.generatedAt)}`);
   lines.push("");
-  lines.push("> [!summary] LJ OS Daily Summary");
-  lines.push(`> - Repos scanned: ${formatNumber(summary.reposScanned)}`);
-  lines.push(`> - Repos touched: ${formatNumber(summary.reposTouchedToday)}`);
-  lines.push(`> - Commits today: ${formatNumber(summary.commitsToday)}`);
-  lines.push(`> - Dirty repos: ${formatNumber(summary.dirtyRepos)}`);
-  lines.push(`> - Unpushed commits: ${formatNumber(summary.unpushedCommits)}`);
-  lines.push(`> - Behind commits: ${formatNumber(summary.behindCommits)}`);
+  lines.push("> [!summary] 🏁 Git Your Daily");
+  lines.push(`> 🧭 Scanned: **${formatNumber(summary.reposScanned)}** repos`);
+  lines.push(`> 🛠️ Touched: **${formatNumber(summary.reposTouchedToday)}** repos`);
+  lines.push(`> 🏁 Commits: **${formatNumber(summary.commitsToday)}**`);
+  lines.push(`> 🧼 Tidy up: **${formatNumber(summary.dirtyRepos)}** repos`);
+  lines.push(`> 🚀 Unpushed: **${formatNumber(summary.unpushedCommits)}**`);
+  lines.push(`> 📥 Behind remote: **${formatNumber(summary.behindCommits)}**`);
   lines.push("");
-  lines.push("### Repositories");
+  lines.push("### 🧰 Repo Garage");
   lines.push("");
-  lines.push("| Repo | Branch | Commits | Dirty | Unpushed | Behind | Latest Commit |");
+  lines.push("| Repo | 🌿 Branch | 🏁 Commits | 🧼 Status | 🚀 Unpushed | 📥 Behind | Latest |");
   lines.push("| --- | --- | ---: | :---: | ---: | ---: | --- |");
 
   if (repos.length === 0) {
-    lines.push("| No repos included |  | 0 | No | 0 | 0 | No commits yet |");
+    lines.push("| No repos included |  | 0 | ✅ Clean | 0 | 0 | No commits yet |");
   } else {
     for (const repo of repos) {
       lines.push(
@@ -189,7 +189,7 @@ function renderDynoSheetMarkdown(dynoSheet, heading) {
           tableCell(repo.name || "Unnamed repo"),
           tableCell(repo.branch || ""),
           tableCell(formatNumber(repo.commitsToday)),
-          tableCell(formatBoolean(repo.dirty)),
+          tableCell(formatRepoStatus(repo.dirty)),
           tableCell(formatNumber(repo.unpushedCommits)),
           tableCell(formatNumber(repo.behindUpstream)),
           tableCell(formatLatestCommit(repo.latestCommit)),
@@ -199,15 +199,15 @@ function renderDynoSheetMarkdown(dynoSheet, heading) {
   }
 
   lines.push("");
-  lines.push("### Cleanup Queue");
+  lines.push("### 🧹 Tidy-Up Queue");
   lines.push("");
 
   if (dirtyRepos.length === 0) {
-    lines.push("No dirty repos.");
+    lines.push("✅ All scanned repos are clean.");
   } else {
     for (const repo of dirtyRepos) {
-      const branch = repo.branch ? ` (${repo.branch})` : "";
-      lines.push(`- ${formatScalar(repo.name || "Unnamed repo")}${branch}`);
+      const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
+      lines.push(`- 🧹 ${formatScalar(repo.name || "Unnamed repo")}${branch}`);
     }
   }
 
@@ -312,8 +312,8 @@ function formatNumber(value) {
   return Number.isFinite(Number(value)) ? String(Number(value)) : "0";
 }
 
-function formatBoolean(value) {
-  return value ? "Yes" : "No";
+function formatRepoStatus(value) {
+  return value ? "🧹 Tidy" : "✅ Clean";
 }
 
 function formatGeneratedAt(value) {
@@ -346,6 +346,10 @@ function formatScalar(value) {
 
 function tableCell(value) {
   return formatScalar(value).replace(/\|/g, "\\|");
+}
+
+function formatInlineCode(value) {
+  return formatScalar(value).replace(/`/g, "'");
 }
 
 function formatLatestCommit(latestCommit) {

@@ -49,17 +49,46 @@ Note, and the plugin does not expose a command for opening raw JSON.
 
 - **Dyno sheet folder** defaults to `LJ OS/stats`.
 - **Daily note folder** defaults to `Daily Notes`.
-- **Daily section heading** defaults to `## LJ OS Daily Dyno Sheet`.
+- **Daily section heading** defaults to `## 🏁 Git Your Daily`.
 
 Settings are stored with Obsidian's `loadData` and `saveData` plugin APIs.
+
+## Rendered section
+
+The generated Daily Note section is emoji-forward and built for quick scanning:
+
+```markdown
+## 🏁 Git Your Daily
+
+Generated: May 12, 2026, 9:00 PM PDT
+
+> [!summary] 🏁 Git Your Daily
+> 🧭 Scanned: **23** repos
+> 🛠️ Touched: **4** repos
+> 🏁 Commits: **26**
+> 🧼 Tidy up: **5** repos
+> 🚀 Unpushed: **0**
+> 📥 Behind remote: **0**
+
+### 🧰 Repo Garage
+
+| Repo | 🌿 Branch | 🏁 Commits | 🧼 Status | 🚀 Unpushed | 📥 Behind | Latest |
+| --- | --- | ---: | :---: | ---: | ---: | --- |
+| CannabisMath | main | 3 | ✅ Clean | 0 | 0 | abc1234 - Update formulas |
+| CannabisCOA.Parser | main | 1 | 🧹 Tidy | 0 | 0 | def5678 - Parse potency notes |
+
+### 🧹 Tidy-Up Queue
+
+- 🧹 CannabisCOA.Parser `main`
+```
 
 ## v0.1.0 scope
 
 - Reads schema version `0.1.0` JSON dyno sheets from the vault.
 - Uses local calendar dates in `YYYY-MM-DD` format.
 - Writes to `Daily Notes/YYYY-MM-DD.md` by default.
-- Generates markdown with a readable generated timestamp, a summary callout, repo table,
-  cleanup queue, and repo notes.
+- Generates markdown with a readable generated timestamp, summary callout,
+  repo garage table, tidy-up queue, and repo notes.
 - Replaces the configured LJ OS section instead of duplicating it.
 - Does not expose raw JSON viewing or debug-note commands.
 - Does not call Git, access OS telemetry, or use the GitHub API.

@@ -3,6 +3,9 @@
 All views render the same CLI JSON. They only change how the Git Wall appears
 in your Daily Note.
 
+For rendered Markdown examples of every supported layout, see the
+[Example Output Gallery](../README.md#example-output-gallery).
+
 ## Summary Styles
 
 - **Callout**: the default Obsidian summary callout.

@@ -1,7 +1,7 @@
 # LJ OS Obsidian Plugin
 
-Local Obsidian plugin for inserting the LJ OS daily dyno sheet into an
-Obsidian Daily Note.
+Local Obsidian plugin for inserting the LJ OS Git Wall into an Obsidian Daily
+Note.
 
 ## Local install
 
@@ -21,7 +21,7 @@ This v0.1.0 implementation does not require `npm install` or a build step.
 
 ## Expected CLI output path
 
-The companion CLI should write one JSON dyno sheet per day inside the vault:
+The companion CLI should write one JSON data file per day inside the vault:
 
 ```text
 G:\WASH3DVault\LJ OS\stats\YYYY-MM-DD.json
@@ -35,22 +35,22 @@ LJ OS/stats/YYYY-MM-DD.json
 
 ## Commands
 
-- **Insert Today's Dyno Sheet** reads today's JSON dyno sheet, creates today's
+- **Insert Today's Git Wall** reads today's JSON data, creates today's
   Daily Note if needed, and inserts or replaces the configured LJ OS section.
 
-If today's dyno sheet is missing, the plugin shows a Notice that it has not
+If today's Git Wall data is missing, the plugin shows a Notice that it has not
 been generated yet.
 
-The JSON dyno sheet is internal data produced by `obsidian-lj-os-cli` for this
+The JSON file is internal data produced by `obsidian-lj-os-cli` for this
 plugin. Users normally interact with the rendered LJ OS section in the Daily
 Note, and the plugin does not expose a command for opening raw JSON.
 
 ## Plugin settings
 
-- **Dyno sheet folder** defaults to `LJ OS/stats`.
+- **Git Wall data folder** defaults to `LJ OS/stats`.
 - **Daily note folder** defaults to `Daily Notes`.
-- **Daily section heading** defaults to `## 🏁 Git Your Daily`.
-- **Summary callout title** defaults to `🏁 Git Your Daily`.
+- **Daily section heading** defaults to `## 🧱 Git Wall`.
+- **Summary callout title** defaults to `🏁 Git Wall`.
 - **Repository section title** defaults to `🧰 Repo Garage`.
 - **Tidy-up section title** defaults to `🧹 Tidy-Up Queue`.
 - **Use emoji** defaults to on.
@@ -73,7 +73,7 @@ update or remove the old heading in the Daily Note.
 
 Emoji mode changes rendered output but does not rewrite saved setting text. If
 you turn emoji off but leave the Daily section heading as
-`## 🏁 Git Your Daily`, that main heading remains unchanged because it is the
+`## 🧱 Git Wall`, that main heading remains unchanged because it is the
 replacement marker.
 
 The summary, repository table, and tidy-up queue can each be hidden. If all
@@ -116,11 +116,11 @@ emoji-forward labels.
 With **Use emoji** enabled:
 
 ```markdown
-## 🏁 Git Your Daily
+## 🧱 Git Wall
 
 Generated: May 12, 2026, 9:00 PM PDT
 
-> [!summary] 🏁 Git Your Daily
+> [!summary] 🏁 Git Wall
 > 🧭 Scanned: **23** repos
 > 🛠️ Touched: **4** repos
 > 🏁 Commits: **26**
@@ -146,11 +146,11 @@ With **Use emoji** disabled, leading emojis in configured titles are stripped
 during render:
 
 ```markdown
-## Git Your Daily
+## Git Wall
 
 Generated: May 12, 2026, 9:00 PM PDT
 
-> [!summary] Git Your Daily
+> [!summary] Git Wall
 > Scanned: **23** repos
 > Touched: **4** repos
 > Commits: **26**
@@ -178,7 +178,7 @@ All scanned repos are clean.
 
 ## v0.1.0 scope
 
-- Reads schema version `0.1.0` JSON dyno sheets from the vault.
+- Reads schema version `0.1.0` Git Wall JSON data from the vault.
 - Uses local calendar dates in `YYYY-MM-DD` format.
 - Writes to `Daily Notes/YYYY-MM-DD.md` by default.
 - Generates markdown with a readable generated timestamp, summary callout,

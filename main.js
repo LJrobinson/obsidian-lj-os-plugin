@@ -3,8 +3,8 @@ const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath
 const DEFAULT_SETTINGS = {
   dynoSheetFolder: "LJ OS/stats",
   dailyNoteFolder: "Daily Notes",
-  dailySectionHeading: "## 🏁 Git Your Daily",
-  summaryTitle: "🏁 Git Your Daily",
+  dailySectionHeading: "## 🧱 Git Wall",
+  summaryTitle: "🏁 Git Wall",
   repoSectionTitle: "🧰 Repo Garage",
   tidySectionTitle: "🧹 Tidy-Up Queue",
   useEmoji: true,
@@ -19,16 +19,21 @@ module.exports = class LjOsPlugin extends Plugin {
     await this.loadSettings();
 
     this.addCommand({
-      id: "insert-todays-dyno-sheet",
-      name: "Insert Today's Dyno Sheet",
-      callback: () => this.insertTodaysDynoSheet(),
+      id: "insert-todays-git-sheet",
+      name: "Insert Today's Git Wall",
+      callback: () => this.insertTodaysGitSheet(),
     });
 
     this.addSettingTab(new LjOsSettingTab(this.app, this));
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const savedSettings = (await this.loadData()) || {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
+
+    if (hasOwn(savedSettings, "gitSheetFolder") && !hasOwn(savedSettings, "dynoSheetFolder")) {
+      this.settings.dynoSheetFolder = savedSettings.gitSheetFolder;
+    }
   }
 
   async saveSettings() {
@@ -44,7 +49,7 @@ module.exports = class LjOsPlugin extends Plugin {
     return `${year}-${month}-${day}`;
   }
 
-  getTodaysDynoSheetPath() {
+  getTodaysGitSheetPath() {
     return joinVaultPath(this.settings.dynoSheetFolder, `${this.getTodayStamp()}.json`);
   }
 
@@ -52,26 +57,26 @@ module.exports = class LjOsPlugin extends Plugin {
     return joinVaultPath(this.settings.dailyNoteFolder, `${this.getTodayStamp()}.md`);
   }
 
-  async insertTodaysDynoSheet() {
-    const dynoSheetPath = this.getTodaysDynoSheetPath();
-    const dynoSheetFile = this.app.vault.getAbstractFileByPath(dynoSheetPath);
+  async insertTodaysGitSheet() {
+    const gitSheetPath = this.getTodaysGitSheetPath();
+    const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
 
-    if (!(dynoSheetFile instanceof TFile)) {
-      new Notice("Today's LJ OS dyno sheet has not been generated yet.");
+    if (!(gitSheetFile instanceof TFile)) {
+      new Notice("Today's LJ OS Git Wall data has not been generated yet.");
       return;
     }
 
-    let dynoSheet;
+    let gitSheet;
     try {
-      dynoSheet = JSON.parse(await this.app.vault.read(dynoSheetFile));
+      gitSheet = JSON.parse(await this.app.vault.read(gitSheetFile));
     } catch (error) {
-      console.error("Failed to parse LJ OS dyno sheet JSON", error);
-      new Notice("Today's LJ OS dyno sheet could not be parsed.");
+      console.error("Failed to parse LJ OS Git Wall JSON", error);
+      new Notice("Today's LJ OS Git Wall data could not be parsed.");
       return;
     }
 
-    if (!dynoSheet || typeof dynoSheet !== "object") {
-      new Notice("Today's LJ OS dyno sheet is not a valid JSON object.");
+    if (!gitSheet || typeof gitSheet !== "object") {
+      new Notice("Today's LJ OS Git Wall data is not a valid JSON object.");
       return;
     }
 
@@ -103,12 +108,12 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     const existingContent = await this.app.vault.read(dailyNoteFile);
-    const sectionMarkdown = renderDynoSheetMarkdown(dynoSheet, this.settings);
+    const sectionMarkdown = renderGitSheetMarkdown(gitSheet, this.settings);
     const updatedContent = upsertSection(existingContent, this.settings.dailySectionHeading, sectionMarkdown);
 
     await this.app.vault.modify(dailyNoteFile, updatedContent);
     await this.app.workspace.getLeaf(false).openFile(dailyNoteFile);
-    new Notice("Inserted today's LJ OS dyno sheet.");
+    new Notice("Inserted today's LJ OS Git Wall.");
   }
 };
 
@@ -125,8 +130,8 @@ class LjOsSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Paths" });
 
     new Setting(containerEl)
-      .setName("Dyno sheet folder")
-      .setDesc("Vault-relative folder containing LJ OS JSON dyno sheets.")
+      .setName("Git Wall data folder")
+      .setDesc("Vault-relative folder containing LJ OS JSON data from the CLI.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.dynoSheetFolder)
@@ -155,7 +160,7 @@ class LjOsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Daily section heading")
       .setDesc(
-        "Exact Markdown heading used to find and replace the existing section. Existing users can change \"## LJ OS Daily Dyno Sheet\" to \"## 🏁 Git Your Daily\"."
+        "Exact Markdown heading used to find and replace the existing section. Existing users can change \"## LJ OS Daily Dyno Sheet\" to \"## 🧱 Git Wall\"."
       )
       .addText((text) =>
         text
@@ -272,11 +277,11 @@ class LjOsSettingTab extends PluginSettingTab {
   }
 }
 
-function renderDynoSheetMarkdown(dynoSheet, settingsOrHeading) {
+function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const renderSettings = normalizeRenderSettings(settingsOrHeading);
   const useEmoji = renderSettings.useEmoji !== false;
-  const summary = dynoSheet.summary || {};
-  const repos = Array.isArray(dynoSheet.repos) ? dynoSheet.repos : [];
+  const summary = gitSheet.summary || {};
+  const repos = Array.isArray(gitSheet.repos) ? gitSheet.repos : [];
   const dirtyRepos = repos.filter((repo) => Boolean(repo.dirty));
   const reposWithNotes = repos.filter((repo) => hasNotes(repo.notes));
   const summaryTitle = formatTitle(renderSettings.summaryTitle, DEFAULT_SETTINGS.summaryTitle, useEmoji);
@@ -291,7 +296,7 @@ function renderDynoSheetMarkdown(dynoSheet, settingsOrHeading) {
 
   lines.push((renderSettings.dailySectionHeading || DEFAULT_SETTINGS.dailySectionHeading).trim());
   lines.push("");
-  lines.push(`Generated: ${formatGeneratedAt(dynoSheet.generatedAt)}`);
+  lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
 
   if (showSummary) {
     blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji));
@@ -438,6 +443,10 @@ async function ensureFolder(vault, folderPath) {
 
 function joinVaultPath(...parts) {
   return normalizePath(parts.map((part) => String(part || "").trim()).filter(Boolean).join("/"));
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 function getFolderPart(path) {

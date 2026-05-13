@@ -58,7 +58,7 @@ Note, and the plugin does not expose a command for opening raw JSON.
 - **Show repository table** defaults to on.
 - **Show tidy-up queue** defaults to on.
 - **Table format** defaults to `standard`; allowed values are `compact`,
-  `standard`, and `detailed`.
+  `standard`, `detailed`, and `emoji-board`.
 
 Settings are stored with Obsidian's `loadData` and `saveData` plugin APIs.
 
@@ -106,8 +106,26 @@ No LJ OS sections are enabled.
 | --- | --- | ---: | :---: | ---: | ---: | --- | --- |
 ```
 
+`emoji-board`:
+
+```markdown
+| Repo | Branch | Activity | Tidy | Push | Pull |
+| --- | --- | :---: | :---: | :---: | :---: |
+```
+
 When emoji mode is on, the rendered table headers and status values use the
 emoji-forward labels.
+
+Emoji-board mode turns repo activity into a compact status board:
+
+```markdown
+| 🧰 Repo | 🌿 Branch | 🏁 Activity | 🧼 Tidy | 🚀 Push | 📥 Pull |
+| --- | --- | :---: | :---: | :---: | :---: |
+| CannabisMath | main | 🏁🏁 | ✅ | ✅ | ✅ |
+| CannabisCOA.Parser | main | 🏁 | 🧹 | 🚀 2 | 📥 1 |
+
+> 🏁 activity · 🧹 tidy needed · ✅ clear · 🚀 unpushed · 📥 behind remote
+```
 
 ## Rendered section
 

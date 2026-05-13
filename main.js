@@ -11,7 +11,9 @@ const DEFAULT_SETTINGS = {
   showSummary: true,
   summaryStyle: "callout",
   showRepoTable: true,
+  repoView: "table",
   showTidyQueue: true,
+  tidyView: "queue",
   tableFormat: "standard",
 };
 
@@ -178,7 +180,7 @@ class LjOsSettingTab extends PluginSettingTab {
     });
 
     new Setting(containerEl)
-      .setName("Summary callout title")
+      .setName("Summary title")
       .setDesc("Title shown in the summary callout.")
       .addText((text) =>
         text
@@ -232,8 +234,8 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Show summary")
-      .setDesc("Render the summary callout.")
+      .setName("Show summary section")
+      .setDesc("Render the summary section.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showSummary !== false).onChange(async (value) => {
           this.plugin.settings.showSummary = value;
@@ -248,7 +250,7 @@ class LjOsSettingTab extends PluginSettingTab {
         dropdown
           .addOption("callout", "Callout")
           .addOption("scoreboard", "Scoreboard")
-          .addOption("hud", "HUD")
+          .addOption("pit-wall", "Pit Wall")
           .setValue(normalizeSummaryStyle(this.plugin.settings.summaryStyle))
           .onChange(async (value) => {
             this.plugin.settings.summaryStyle = normalizeSummaryStyle(value);
@@ -257,8 +259,8 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Show repository table")
-      .setDesc("Render the repository table section.")
+      .setName("Show repository section")
+      .setDesc("Render the repository section.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showRepoTable !== false).onChange(async (value) => {
           this.plugin.settings.showRepoTable = value;
@@ -267,8 +269,22 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Repo view")
+      .setDesc("Choose how repositories are rendered.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("table", "Table")
+          .addOption("status-cards", "Status Cards")
+          .setValue(normalizeRepoView(this.plugin.settings.repoView))
+          .onChange(async (value) => {
+            this.plugin.settings.repoView = normalizeRepoView(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Table format")
-      .setDesc("Choose how many columns the repository table includes.")
+      .setDesc("Choose how many columns the repository table includes. Table format applies only when Repo view is Table.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("compact", "Compact")
@@ -283,8 +299,8 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Show tidy-up queue")
-      .setDesc("Render the tidy-up queue section.")
+      .setName("Show tidy-up section")
+      .setDesc("Render the tidy-up section.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showTidyQueue !== false).onChange(async (value) => {
           this.plugin.settings.showTidyQueue = value;
@@ -292,7 +308,19 @@ class LjOsSettingTab extends PluginSettingTab {
         })
       );
 
-
+    new Setting(containerEl)
+      .setName("Tidy view")
+      .setDesc("Choose how tidy-up work is rendered.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("queue", "Queue")
+          .addOption("shutdown-checklist", "Shutdown Checklist")
+          .setValue(normalizeTidyView(this.plugin.settings.tidyView))
+          .onChange(async (value) => {
+            this.plugin.settings.tidyView = normalizeTidyView(value);
+            await this.plugin.saveSettings();
+          })
+      );
   }
 }
 
@@ -307,6 +335,8 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const repoSectionTitle = formatTitle(renderSettings.repoSectionTitle, DEFAULT_SETTINGS.repoSectionTitle, useEmoji);
   const tidySectionTitle = formatTitle(renderSettings.tidySectionTitle, DEFAULT_SETTINGS.tidySectionTitle, useEmoji);
   const summaryStyle = normalizeSummaryStyle(renderSettings.summaryStyle);
+  const repoView = normalizeRepoView(renderSettings.repoView);
+  const tidyView = normalizeTidyView(renderSettings.tidyView);
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
@@ -323,11 +353,11 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   }
 
   if (showRepoTable) {
-    blocks.push(renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat));
+    blocks.push(renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat));
   }
 
   if (showTidyQueue) {
-    blocks.push(renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji));
+    blocks.push(renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji, tidyView));
   }
 
   if (blocks.length === 0) {
@@ -344,8 +374,8 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
 }
 
 function renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle) {
-  if (summaryStyle === "hud") {
-    return [formatSummaryHud(summary, useEmoji)];
+  if (summaryStyle === "pit-wall") {
+    return formatSummaryPitWall(summary, useEmoji);
   }
 
   if (summaryStyle === "scoreboard") {
@@ -368,25 +398,33 @@ function formatSummaryCallout(summary, summaryTitle, useEmoji) {
 }
 
 function formatSummaryScoreboard(summary, useEmoji) {
-  const headers = useEmoji
-    ? ["🧭 Scanned", "🛠️ Touched", "🏁 Commits", "🧼 Tidy", "🚀 Unpushed", "📥 Behind"]
-    : ["Scanned", "Touched", "Commits", "Tidy", "Unpushed", "Behind"];
-
+  const title = useEmoji ? "### 🎮 Git Scoreboard" : "### Git Scoreboard";
   return [
-    toMarkdownTableRow(headers),
-    "| ---: | ---: | ---: | ---: | ---: | ---: |",
-    toMarkdownTableRow(getSummaryValues(summary)),
+    title,
+    "",
+    "| Stat | Value |",
+    "| --- | ---: |",
+    toMarkdownTableRow([maybeEmoji("🧭", "Repos scanned", useEmoji), formatNumber(summary.reposScanned)]),
+    toMarkdownTableRow([maybeEmoji("🛠️", "Repos touched", useEmoji), formatNumber(summary.reposTouchedToday)]),
+    toMarkdownTableRow([maybeEmoji("🏁", "Commits", useEmoji), formatNumber(summary.commitsToday)]),
+    toMarkdownTableRow([maybeEmoji("🧼", "Tidy-up queue", useEmoji), formatNumber(summary.dirtyRepos)]),
+    toMarkdownTableRow([maybeEmoji("🚀", "Unpushed", useEmoji), formatNumber(summary.unpushedCommits)]),
+    toMarkdownTableRow([maybeEmoji("📥", "Behind", useEmoji), formatNumber(summary.behindCommits)]),
   ];
 }
 
-function formatSummaryHud(summary, useEmoji) {
-  const [scanned, touched, commits, tidy, unpushed, behind] = getSummaryValues(summary);
-
-  if (!useEmoji) {
-    return `Scanned ${scanned} · Touched ${touched} · Commits ${commits} · Tidy ${tidy} · Unpushed ${unpushed} · Behind ${behind}`;
-  }
-
-  return `🧭 ${scanned} · 🛠️ ${touched} · 🏁 ${commits} · 🧼 ${tidy} · 🚀 ${unpushed} · 📥 ${behind}`;
+function formatSummaryPitWall(summary, useEmoji) {
+  const title = useEmoji ? "### 🧱 Pit Wall" : "### Pit Wall";
+  return [
+    title,
+    "",
+    "| Signal | Status |",
+    "| --- | --- |",
+    toMarkdownTableRow([maybeEmoji("🏁", "Activity", useEmoji), formatActivityStatus(summary)]),
+    toMarkdownTableRow([maybeEmoji("🧼", "Garage", useEmoji), formatGarageStatus(summary)]),
+    toMarkdownTableRow([maybeEmoji("🚀", "Launch", useEmoji), formatLaunchStatus(summary)]),
+    toMarkdownTableRow([maybeEmoji("📥", "Sync", useEmoji), formatSyncStatus(summary)]),
+  ];
 }
 
 function getSummaryValues(summary) {
@@ -398,6 +436,37 @@ function getSummaryValues(summary) {
     formatNumber(summary.unpushedCommits),
     formatNumber(summary.behindCommits),
   ];
+}
+
+function formatActivityStatus(summary) {
+  const commitsToday = toNumber(summary.commitsToday);
+  const reposTouchedToday = formatNumber(summary.reposTouchedToday);
+  const commitLabel = commitsToday === 1 ? "commit" : "commits";
+
+  return `${commitsToday} ${commitLabel} across ${reposTouchedToday} repos`;
+}
+
+function formatGarageStatus(summary) {
+  const dirtyRepos = toNumber(summary.dirtyRepos);
+  return dirtyRepos === 0 ? "All included repos are clean" : `${dirtyRepos} repos need tidy-up`;
+}
+
+function formatLaunchStatus(summary) {
+  const unpushedCommits = toNumber(summary.unpushedCommits);
+  return unpushedCommits === 0 ? "Clear, nothing unpushed" : `${unpushedCommits} unpushed commits`;
+}
+
+function formatSyncStatus(summary) {
+  const behindCommits = toNumber(summary.behindCommits);
+  return behindCommits === 0 ? "Clear, nothing behind" : `${behindCommits} commits behind remote`;
+}
+
+function renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat) {
+  if (repoView === "status-cards") {
+    return renderRepoStatusCardLines(repos, reposWithNotes, repoSectionTitle, useEmoji);
+  }
+
+  return renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat);
 }
 
 function renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat) {
@@ -433,6 +502,63 @@ function renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji,
   return lines;
 }
 
+function renderRepoStatusCardLines(repos, reposWithNotes, repoSectionTitle, useEmoji) {
+  const lines = [`### ${repoSectionTitle}`];
+
+  if (repos.length === 0) {
+    lines.push("");
+    lines.push("> [!success] No repos included");
+    lines.push(`> ${formatCommitCount(0)} · ${useEmoji ? "✅ clean" : "clean"} · ${formatUnpushedStatus(0, useEmoji)} · ${formatBehindStatus(0, useEmoji)}  `);
+    lines.push("> No commits yet");
+  } else {
+    for (const repo of repos) {
+      lines.push("");
+      lines.push(...formatRepoStatusCard(repo, useEmoji));
+    }
+  }
+
+  appendRepoNotes(lines, reposWithNotes);
+  return lines;
+}
+
+function formatRepoStatusCard(repo, useEmoji) {
+  const callout = isRepoClear(repo) ? "success" : "warning";
+  const title = formatRepoTitle(repo);
+  const cleanStatus = repo.dirty ? maybeEmoji("🧹", "tidy needed", useEmoji) : maybeEmoji("✅", "clean", useEmoji);
+
+  return [
+    `> [!${callout}] ${title}`,
+    `> ${maybeEmoji("🏁", formatCommitCount(repo.commitsToday), useEmoji)} · ${cleanStatus} · ${formatUnpushedStatus(repo.unpushedCommits, useEmoji)} · ${formatBehindStatus(repo.behindUpstream, useEmoji)}  `,
+    `> ${formatLatestCommit(repo.latestCommit)}`,
+  ];
+}
+
+function appendRepoNotes(lines, reposWithNotes) {
+  if (reposWithNotes.length === 0) {
+    return;
+  }
+
+  lines.push("");
+  lines.push("### Repo Notes");
+  lines.push("");
+
+  for (const repo of reposWithNotes) {
+    lines.push(`#### ${formatScalar(repo.name || "Unnamed repo")}`);
+    for (const note of normalizeNotes(repo.notes)) {
+      lines.push(`- ${formatScalar(note)}`);
+    }
+    lines.push("");
+  }
+}
+
+function renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji, tidyView) {
+  if (tidyView === "shutdown-checklist") {
+    return renderShutdownChecklistLines(dirtyRepos, summary, useEmoji);
+  }
+
+  return renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji);
+}
+
 function renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji) {
   const lines = [`### ${tidySectionTitle}`, ""];
 
@@ -444,6 +570,35 @@ function renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji) {
   for (const repo of dirtyRepos) {
     const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
     lines.push(`- ${maybeEmoji("🧹", `${formatScalar(repo.name || "Unnamed repo")}${branch}`, useEmoji)}`);
+  }
+
+  return lines;
+}
+
+function renderShutdownChecklistLines(dirtyRepos, summary, useEmoji) {
+  const lines = [useEmoji ? "### 🧹 Shutdown Checklist" : "### Shutdown Checklist", ""];
+  const unpushedCommits = toNumber(summary.unpushedCommits);
+  const behindCommits = toNumber(summary.behindCommits);
+
+  for (const repo of dirtyRepos) {
+    const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
+    lines.push(`- [ ] ${maybeEmoji("🧹", `${formatScalar(repo.name || "Unnamed repo")}${branch} needs tidy-up`, useEmoji)}`);
+  }
+
+  if (unpushedCommits === 0) {
+    lines.push(`- [x] ${maybeEmoji("🚀", "No unpushed commits", useEmoji)}`);
+  } else {
+    lines.push(`- [ ] ${maybeEmoji("🚀", `${unpushedCommits} unpushed commits need push review`, useEmoji)}`);
+  }
+
+  if (behindCommits === 0) {
+    lines.push(`- [x] ${maybeEmoji("📥", "No repos behind remote", useEmoji)}`);
+  } else {
+    lines.push(`- [ ] ${maybeEmoji("📥", `${behindCommits} commits behind remote need pull/sync review`, useEmoji)}`);
+  }
+
+  if (dirtyRepos.length === 0 && unpushedCommits === 0 && behindCommits === 0) {
+    lines.push(`- [x] ${maybeEmoji("✅", "Garage closed clean", useEmoji)}`);
   }
 
   return lines;
@@ -546,7 +701,15 @@ function normalizeTableFormat(value) {
 }
 
 function normalizeSummaryStyle(value) {
-  return ["callout", "scoreboard", "hud"].includes(value) ? value : DEFAULT_SETTINGS.summaryStyle;
+  return ["callout", "scoreboard", "pit-wall"].includes(value) ? value : DEFAULT_SETTINGS.summaryStyle;
+}
+
+function normalizeRepoView(value) {
+  return ["table", "status-cards"].includes(value) ? value : DEFAULT_SETTINGS.repoView;
+}
+
+function normalizeTidyView(value) {
+  return ["queue", "shutdown-checklist"].includes(value) ? value : DEFAULT_SETTINGS.tidyView;
 }
 
 function sanitizeTextSetting(value, fallback) {
@@ -701,6 +864,31 @@ function formatRepoTableRow(repo, useEmoji, tableFormat) {
 
 function toMarkdownTableRow(cells) {
   return `| ${cells.map((cell) => tableCell(cell)).join(" | ")} |`;
+}
+
+function isRepoClear(repo) {
+  return !repo.dirty && toNumber(repo.unpushedCommits) === 0 && toNumber(repo.behindUpstream) === 0;
+}
+
+function formatRepoTitle(repo) {
+  const name = formatScalar(repo.name || "Unnamed repo");
+  const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
+  return `${name}${branch}`;
+}
+
+function formatCommitCount(value) {
+  const count = toNumber(value);
+  return `${count} ${count === 1 ? "commit" : "commits"}`;
+}
+
+function formatUnpushedStatus(value, useEmoji) {
+  const count = toNumber(value);
+  return maybeEmoji("🚀", `${count} unpushed`, useEmoji);
+}
+
+function formatBehindStatus(value, useEmoji) {
+  const count = toNumber(value);
+  return maybeEmoji("📥", `${count} behind`, useEmoji);
 }
 
 function formatActivityCell(value, useEmoji) {

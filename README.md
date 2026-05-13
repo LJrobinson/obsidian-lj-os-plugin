@@ -56,9 +56,13 @@ Note, and the plugin does not expose a command for opening raw JSON.
 - **Use emoji** defaults to on.
 - **Show summary** defaults to on.
 - **Summary style** defaults to `callout`; allowed values are `callout`,
-  `scoreboard`, and `hud`.
-- **Show repository table** defaults to on.
-- **Show tidy-up queue** defaults to on.
+  `scoreboard`, and `pit-wall`.
+- **Show repository section** defaults to on.
+- **Repo view** defaults to `table`; allowed values are `table` and
+  `status-cards`.
+- **Show tidy-up section** defaults to on.
+- **Tidy view** defaults to `queue`; allowed values are `queue` and
+  `shutdown-checklist`.
 - **Table format** defaults to `standard`; allowed values are `compact`,
   `standard`, `detailed`, and `emoji-board`.
 
@@ -78,12 +82,15 @@ you turn emoji off but leave the Daily section heading as
 `## 🧱 Git Wall`, that main heading remains unchanged because it is the
 replacement marker.
 
-The summary, repository table, and tidy-up queue can each be hidden. If all
+The summary, repository section, and tidy-up section can each be hidden. If all
 three are hidden, the rendered section falls back to:
 
 ```markdown
 No LJ OS sections are enabled.
 ```
+
+All view settings are render-only views over the same CLI JSON. They do not
+change the JSON schema, the expected CLI output path, or Daily Note placement.
 
 ## Summary styles
 
@@ -99,24 +106,32 @@ No LJ OS sections are enabled.
 > 📥 Behind remote: **0**
 ```
 
-`scoreboard` renders a compact table:
+`scoreboard` renders a stat table:
 
 ```markdown
-| 🧭 Scanned | 🛠️ Touched | 🏁 Commits | 🧼 Tidy | 🚀 Unpushed | 📥 Behind |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 23 | 4 | 26 | 5 | 0 | 0 |
+### 🎮 Git Scoreboard
+
+| Stat | Value |
+| --- | ---: |
+| 🧭 Repos scanned | 23 |
+| 🛠️ Repos touched | 4 |
+| 🏁 Commits | 26 |
+| 🧼 Tidy-up queue | 5 |
+| 🚀 Unpushed | 0 |
+| 📥 Behind | 0 |
 ```
 
-`hud` renders a single line:
+`pit-wall` renders interpreted status:
 
 ```markdown
-🧭 23 · 🛠️ 4 · 🏁 26 · 🧼 5 · 🚀 0 · 📥 0
-```
+### 🧱 Pit Wall
 
-With emoji mode off, `hud` renders:
-
-```markdown
-Scanned 23 · Touched 4 · Commits 26 · Tidy 5 · Unpushed 0 · Behind 0
+| Signal | Status |
+| --- | --- |
+| 🏁 Activity | 26 commits across 4 repos |
+| 🧼 Garage | 5 repos need tidy-up |
+| 🚀 Launch | Clear, nothing unpushed |
+| 📥 Sync | Clear, nothing behind |
 ```
 
 ## Table formats
@@ -161,6 +176,54 @@ Emoji-board mode turns repo activity into a compact status board:
 | CannabisCOA.Parser | main | 🏁 | 🧹 | 🚀 2 | 📥 1 |
 
 > 🏁 activity · 🧹 tidy needed · ✅ clear · 🚀 unpushed · 📥 behind remote
+```
+
+Table format applies only when Repo view is `table`.
+
+## Repo views
+
+`table` uses the selected table format.
+
+`status-cards` renders one Obsidian callout per repo:
+
+```markdown
+### 🧰 Repo Garage
+
+> [!success] moby-atlas `main`
+> 🏁 12 commits · ✅ clean · 🚀 0 unpushed · 📥 0 behind  
+> b78bcc7 - Finalize first MOBY Atlas release
+
+> [!warning] obsidian-lj-os-cli `main`
+> 🏁 1 commit · 🧹 tidy needed · 🚀 0 unpushed · 📥 0 behind  
+> 1c2a7b - first commit
+```
+
+With emoji mode off:
+
+```markdown
+> [!success] moby-atlas `main`
+> 12 commits · clean · 0 unpushed · 0 behind  
+> b78bcc7 - Finalize first MOBY Atlas release
+```
+
+## Tidy views
+
+`queue` keeps the normal tidy-up queue.
+
+`shutdown-checklist` renders end-of-day checks:
+
+```markdown
+### 🧹 Shutdown Checklist
+
+- [ ] 🧹 CannabisCOA.Parser `main` needs tidy-up
+- [x] 🚀 No unpushed commits
+- [x] 📥 No repos behind remote
+```
+
+If everything is clean, it also includes:
+
+```markdown
+- [x] ✅ Garage closed clean
 ```
 
 ## Rendered section
@@ -235,8 +298,8 @@ All scanned repos are clean.
 - Reads schema version `0.1.0` Git Wall JSON data from the vault.
 - Uses local calendar dates in `YYYY-MM-DD` format.
 - Writes to `Daily Notes/YYYY-MM-DD.md` by default.
-- Generates markdown with a readable generated timestamp, summary callout,
-  repo garage table, tidy-up queue, repo notes, customizable section titles,
+- Generates markdown with a readable generated timestamp, summary views,
+  repo garage views, tidy-up views, repo notes, customizable section titles,
   visibility toggles, table formats, and optional emoji rendering.
 - Replaces the configured LJ OS section instead of duplicating it.
 - Does not expose raw JSON viewing or debug-note commands.

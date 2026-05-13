@@ -1,84 +1,105 @@
 # FAQ
 
-## What is Git Wall?
+## What is LJ OS Git Wall?
 
-Git Wall is an Obsidian desktop plugin that discovers repos from manual scan
-roots, quietly scans enabled tracked local Git repositories, and renders a daily
-activity snapshot into your Daily Note.
+LJ OS Git Wall is a standalone Obsidian desktop plugin that turns local Git
+activity into a Daily Note dashboard. It discovers repos from scan roots you
+choose, scans enabled tracked repositories, stores daily JSON in your vault,
+and renders the Git Wall from that cached data.
 
-## Do I need a companion CLI?
+## Who is it for?
 
-No. LJ OS is standalone. The plugin scans enabled tracked local repos itself,
-stores generated JSON in your vault, and renders from that local data.
+It is for people who work across multiple local repos and want a quick daily
+view of commits, dirty repos, unpushed work, behind branches, and cleanup tasks
+without opening several terminals.
+
+## Do I need a companion repo, CLI, app, login, or API key?
+
+No. LJ OS is one standalone Obsidian plugin. It does not require a second repo,
+companion app, required CLI, login, API key, cloud service, or GitHub API.
 
 ## Does the plugin scan my whole computer?
 
-No. It scans only enabled tracked repository paths. Auto-scan does not crawl
-drives, rediscover repos, or walk broad folder trees.
-
-## Is discovery automatic?
-
-Discovery is manual: add scan roots such as `G:\` or `C:\Repos`, then click
-**Discover repositories**. Startup, interval, and view-open scans only read the
-tracked repos discovered from those roots or entered manually.
+No. Discovery searches only the scan roots you configure, and only when you
+click **Discover repositories**. Scans read enabled tracked repositories only.
+Auto-scan does not crawl drives, rediscover repos, or walk broad folder trees.
 
 ## What is the fastest setup?
 
-Open LJ OS settings, use the **Get started** panel, add your main repo folder or
-drive as a scan root, click **Discover repositories**, review tracked repos, and
-click **Scan now**.
+Open LJ OS settings, use the **Git Started** card, add your main repo folder or
+drive as a **Scan root**, click **Discover repositories**, review **Tracked
+repositories**, then click **Scan now**. After repos are tracked, the card says
+**Setup Complete ☑️**.
+
+## What is the difference between scan roots and tracked repositories?
+
+**Scan roots** are folders or drives LJ OS searches for repos when discovery is
+manually triggered. Example: `G:\`.
+
+**Tracked repositories** are validated Git repos LJ OS scans automatically.
+Example: `G:\obsidian-lj-os-plugin`.
+
+Drive roots belong in **Scan roots**, not **Tracked repositories**.
 
 ## Can I use a drive root like G:\?
 
-Yes. Put `G:\` under **Scan roots**, not **Tracked repositories**. LJ OS will
-search child folders for `.git` metadata when you click **Discover
-repositories**. It will not scan `G:\` itself unless `G:\.git` exists.
+Yes. Put `G:\` under **Scan roots** and click **Discover repositories**. LJ OS
+will look for child repos such as `G:\obsidian-lj-os-plugin`. It will not scan
+`G:\` itself unless `G:\.git` exists.
+
+Broad drive roots can be slower to discover. A specific parent folder such as
+`G:\Code` is faster when you know where your repos live.
 
 ## Does it auto-scan?
 
-Yes. By default, LJ OS scans on startup, every 60 minutes while Obsidian is
-open, and when a stale LJ OS note opens. Manual scan is still available as a
-fallback.
+Yes. By default, LJ OS scans tracked repos on startup and every 60 minutes while
+Obsidian is open. If enabled, view-open refresh shows cached data first and then
+quietly refreshes stale scan data in the background.
 
 ## Does inserting Git Wall run a scan?
 
 No. Insert reads today's cached JSON and renders immediately. If no data exists
 yet, it inserts a helpful fallback message instead of running Git.
 
-## Does it use GitHub, APIs, logins, or cloud services?
+## How long should scans take?
 
-No. It uses local Git metadata and local Git command output when available. It
-does not call GitHub, require API keys, send telemetry, or use remote services.
+Manual scans can take several seconds depending on repo count, disk speed, and
+Git availability. The default scan budget is 30 seconds. If the budget is
+exceeded, LJ OS records warnings and saves useful partial data when possible.
 
 ## Where is activity data stored?
 
-By default, daily JSON snapshots are stored in:
+By default, daily JSON snapshots are stored inside your vault:
 
 ```text
 LJ OS/stats/YYYY-MM-DD.json
 ```
 
-That path is inside your vault and can be changed in plugin settings.
+You can change the Git Wall data folder in plugin settings.
 
-## How long should scans take?
+## Does it send my repo data anywhere?
 
-The default scan budget is 30 seconds. If the budget is exceeded, LJ OS records
-warnings and saves useful partial data when possible.
-
-## Do I need advanced scanning settings?
-
-Usually no. Advanced scanning settings are collapsed by default because most
-users only need scan roots, tracked repositories, automation, and Scan now.
+No. LJ OS itself sends nothing anywhere. It reads local Git metadata and writes
+local JSON in your vault. If you use Obsidian Sync or another sync service, that
+service may sync vault files independently of LJ OS.
 
 ## Why is it desktop-only?
 
-Local filesystem and Git command access are desktop Obsidian capabilities, so
-the plugin is intentionally desktop-first.
+Local filesystem and Git command access are desktop Obsidian capabilities. LJ
+OS is not intended for mobile unless the architecture changes in the future.
+
+## Can I reorder the generated sections?
+
+Yes. Use **Dashboard Layout** in settings. **Move up** and **Move down** change
+the order of Git Scoreboard, Repository Activity, and Cleanup Checklist.
+**Reset layout** restores the default order. This changes output order only; it
+does not affect scanning.
 
 ## Can I customize titles?
 
-Yes. You can customize the main section heading, summary title, repo section
-title, and tidy-up section title.
+Yes. Enable **Show customized label settings** to edit the Daily section
+heading, summary title, repository section title, and tidy-up section title.
+Use **Reset labels** to restore defaults.
 
 ## Can I turn off emoji?
 
@@ -90,8 +111,8 @@ labels without rewriting your saved title settings.
 Yes. You can hide the summary section, repository section, and tidy-up section
 independently.
 
-## Can I use this without Daily Notes?
+## Can I use this without Obsidian's Daily Notes core plugin?
 
-The plugin writes to a date-based markdown file in the configured Daily note
+Yes. LJ OS writes to a date-based markdown file in the configured Daily note
 folder. You do not need Obsidian's core Daily Notes plugin enabled, but Git Wall
-is designed around that Daily Note pattern.
+is designed around a Daily Note workflow.

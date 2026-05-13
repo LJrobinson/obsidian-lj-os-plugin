@@ -13,6 +13,12 @@ const RECENT_AUTO_SCAN_SKIP_MS = 60 * 1000;
 const VIEW_OPEN_SCAN_DEBOUNCE_MS = 60 * 1000;
 const DEFAULT_DISCOVERY_DEPTH = 3;
 const DEFAULT_DISCOVERY_MAX_DIRECTORIES = 2000;
+const DEFAULT_SECTION_ORDER = ["gitScoreboard", "repositoryActivity", "cleanupChecklist"];
+const DASHBOARD_SECTIONS = [
+  { id: "gitScoreboard", label: "Git Scoreboard" },
+  { id: "repositoryActivity", label: "Repository Activity" },
+  { id: "cleanupChecklist", label: "Cleanup Checklist" },
+];
 const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "node_modules",
   ".obsidian",
@@ -48,6 +54,7 @@ const DEFAULT_SETTINGS = {
   showTidyQueue: true,
   tidyView: "queue",
   tableFormat: "standard",
+  sectionOrder: DEFAULT_SECTION_ORDER,
   showAdvancedSettings: false,
   showAdvancedScanningSettings: false,
 };
@@ -106,6 +113,7 @@ module.exports = class LjOsPlugin extends Plugin {
     this.settings.autoScanEnabled = savedSettings.autoScanEnabled !== false;
     this.settings.scanOnViewOpen = savedSettings.scanOnViewOpen !== false;
     this.settings.showAdvancedScanningSettings = savedSettings.showAdvancedScanningSettings === true;
+    this.settings.sectionOrder = normalizeSectionOrder(this.settings.sectionOrder);
     this.scanState = normalizeScanState(savedSettings.scanState);
     if (this.scanState.isScanRunning) {
       this.scanState.lastScanStatus = "interrupted: previous scan did not finish";
@@ -611,6 +619,10 @@ class LjOsSettingTab extends PluginSettingTab {
         })
       );
 
+    new Setting(containerEl).setName("Dashboard Layout").setHeading();
+
+    renderSectionOrderEditor(containerEl, this.plugin);
+
     new Setting(containerEl).setName("Customize Display").setHeading();
 
     new Setting(containerEl)
@@ -796,7 +808,7 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Reset labels")
       .setDesc("Restore the default Git Wall headings and titles.")
       .addButton((button) =>
-        button.setButtonText("Reset labels").onClick(async () => {
+        button.setButtonText("Reset labels").setCta().onClick(async () => {
           this.plugin.settings.dailySectionHeading = DEFAULT_SETTINGS.dailySectionHeading;
           this.plugin.settings.summaryTitle = DEFAULT_SETTINGS.summaryTitle;
           this.plugin.settings.repoSectionTitle = DEFAULT_SETTINGS.repoSectionTitle;
@@ -957,6 +969,76 @@ function renderScanStatusSummary(containerEl, plugin, trackedRepoPaths) {
   panel.appendChild(secondary);
 }
 
+function renderSectionOrderEditor(containerEl, plugin) {
+  const order = normalizeSectionOrder(plugin.settings.sectionOrder);
+  const panel = createCompactPanel(containerEl, "Section order");
+  const list = document.createElement("div");
+  list.style.display = "flex";
+  list.style.flexDirection = "column";
+  list.style.gap = "8px";
+  panel.appendChild(list);
+
+  order.forEach((sectionId, index) => {
+    const section = getDashboardSection(sectionId);
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.justifyContent = "space-between";
+    row.style.gap = "12px";
+    row.style.flexWrap = "wrap";
+    list.appendChild(row);
+
+    const label = document.createElement("div");
+    label.textContent = `${index + 1}. ${section.label}`;
+    label.style.fontWeight = "500";
+    row.appendChild(label);
+
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.gap = "6px";
+    row.appendChild(actions);
+
+    const moveUpButton = createActionButton(
+      "Move up",
+      async () => {
+        plugin.settings.sectionOrder = moveSectionOrderItem(plugin.settings.sectionOrder, index, -1);
+        await plugin.saveSettings();
+        plugin.settingTab.display();
+      },
+      index > 0
+    );
+    moveUpButton.disabled = index === 0;
+    actions.appendChild(moveUpButton);
+
+    const moveDownButton = createActionButton(
+      "Move down",
+      async () => {
+        plugin.settings.sectionOrder = moveSectionOrderItem(plugin.settings.sectionOrder, index, 1);
+        await plugin.saveSettings();
+        plugin.settingTab.display();
+      },
+      index < order.length - 1
+    );
+    moveDownButton.disabled = index === order.length - 1;
+    actions.appendChild(moveDownButton);
+  });
+
+  const resetRow = document.createElement("div");
+  resetRow.style.marginTop = "10px";
+  resetRow.appendChild(
+    createActionButton(
+      "Reset layout",
+      async () => {
+        plugin.settings.sectionOrder = DEFAULT_SECTION_ORDER.slice();
+        await plugin.saveSettings();
+        plugin.settingTab.display();
+      },
+      true
+    )
+  );
+  panel.appendChild(resetRow);
+}
+
 function renderAdvancedScanningDetails(containerEl) {
   const panel = createCompactPanel(containerEl, "Discovery Details");
   const details = document.createElement("p");
@@ -995,6 +1077,50 @@ function createActionButton(label, onClick, isPrimary) {
   return button;
 }
 
+function getDashboardSection(sectionId) {
+  return DASHBOARD_SECTIONS.find((section) => section.id === sectionId) || { id: sectionId, label: sectionId };
+}
+
+function normalizeSectionOrder(value) {
+  const rawOrder = Array.isArray(value) ? value : [];
+  const knownIds = new Set(DASHBOARD_SECTIONS.map((section) => section.id));
+  const seen = new Set();
+  const order = [];
+
+  for (const rawSectionId of rawOrder) {
+    const sectionId = formatScalar(rawSectionId);
+    if (!knownIds.has(sectionId) || seen.has(sectionId)) {
+      continue;
+    }
+
+    seen.add(sectionId);
+    order.push(sectionId);
+  }
+
+  for (const sectionId of DEFAULT_SECTION_ORDER) {
+    if (!seen.has(sectionId)) {
+      seen.add(sectionId);
+      order.push(sectionId);
+    }
+  }
+
+  return order;
+}
+
+function moveSectionOrderItem(order, index, direction) {
+  const normalizedOrder = normalizeSectionOrder(order);
+  const nextIndex = index + direction;
+
+  if (nextIndex < 0 || nextIndex >= normalizedOrder.length) {
+    return normalizedOrder;
+  }
+
+  const movedOrder = normalizedOrder.slice();
+  const [sectionId] = movedOrder.splice(index, 1);
+  movedOrder.splice(nextIndex, 0, sectionId);
+  return movedOrder;
+}
+
 function formatScanStatusLabel(value) {
   const text = formatScalar(value);
 
@@ -1031,16 +1157,14 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
   lines.push(...formatScanMetadataLines(gitSheet));
 
-  if (showSummary) {
-    blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
-  }
-
-  if (showRepoTable) {
-    blocks.push(renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat));
-  }
-
-  if (showTidyQueue) {
-    blocks.push(renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji, tidyView));
+  for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
+    if (sectionId === "gitScoreboard" && showSummary) {
+      blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
+    } else if (sectionId === "repositoryActivity" && showRepoTable) {
+      blocks.push(renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat));
+    } else if (sectionId === "cleanupChecklist" && showTidyQueue) {
+      blocks.push(renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji, tidyView));
+    }
   }
 
   if (sheetNotes.length > 0) {

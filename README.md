@@ -1,43 +1,55 @@
 # LJ OS Git Wall
 
-LJ OS Git Wall is a standalone Obsidian desktop plugin that quietly scans the
-local Git repositories you track and renders a daily activity snapshot into a
-Daily Note.
+LJ OS Git Wall is a standalone Obsidian desktop plugin for people who work
+across local Git repositories and want a quick daily picture of what changed.
+It discovers local repos from folders or drives you choose, quietly scans the
+repos you track, writes a small JSON snapshot inside your vault, and renders a
+Git Wall in your Daily Note from that cached data.
 
-No companion repo. No companion CLI. No login. No API keys. No GitHub API. No
-telemetry. No cloud calls. No spyware. The plugin stays local-first and stores
-its generated activity JSON inside your vault.
+No login. No API keys. No cloud service. No companion repo. No companion app.
+No required CLI. No analytics. LJ OS reads local Git metadata only and stores
+generated activity data locally.
 
 ```text
-Tracked local repos -> quiet auto-scan -> vault JSON -> Daily Note Git Wall
+Scan roots -> Discover repositories -> Tracked repos -> Cached JSON -> Git Wall
 ```
 
 ## What It Does
 
-- discovers repositories from scan roots only when you ask it to
-- scans only enabled tracked repository paths
-- auto-scans on startup, on an interval, and when stale LJ OS notes open
-- reads local Git metadata and local Git command output when available
-- saves daily activity data to a vault-local JSON file
-- inserts or replaces a Git Wall section from cached local JSON
-- supports multiple summary, repository, and tidy-up views
-- keeps manual scanning as a fallback, not the normal workflow
-- avoids broad drive crawling and interval rediscovery
-- works without npm install, a server, a separate package, or a second repo
+- helps you find local Git repos from user-configured scan roots
+- tracks one or more validated Git repositories
+- scans tracked repos on startup and on an interval while Obsidian is open
+- can refresh stale LJ OS views in the background without blocking rendering
+- writes daily JSON snapshots to `LJ OS/stats/YYYY-MM-DD.json` by default
+- inserts or replaces a Daily Note Git Wall from cached JSON only
+- lets you reorder the main generated sections in **Dashboard Layout**
+- keeps manual scanning available as an explicit fallback
 
-This plugin is desktop-first because local filesystem and Git access are desktop
-Obsidian capabilities.
+## What It Does Not Do
+
+- does not require a second repository, external app, server, login, or API key
+- does not call GitHub or any remote API
+- does not send analytics, telemetry, repo names, commits, or paths anywhere
+- does not auto-crawl every drive
+- does not rediscover repos during startup, interval, or view-open scans
+- does not run Git commands while inserting the Git Wall into a note
+- does not support mobile, because local filesystem and Git access are desktop
+  Obsidian capabilities
+
+If Obsidian Sync, Git sync, iCloud, Dropbox, OneDrive, or another tool syncs
+your vault, that is outside LJ OS. LJ OS itself does not send data anywhere.
 
 ## Install From A Release
 
-Download these release assets from this repository:
+Download the individual release assets from this repository:
 
 ```text
 main.js
 manifest.json
 ```
 
-If a future release includes `styles.css`, download that too.
+If a release includes `styles.css`, download that file too. This repository
+does not currently require a stylesheet.
 
 Copy the files into your vault:
 
@@ -45,56 +57,83 @@ Copy the files into your vault:
 <vault>/.obsidian/plugins/lj-os/
 ```
 
-Then reload Obsidian plugins and enable **LJ OS** in Community plugins.
+Then reload Obsidian plugins and enable **LJ OS** in Community plugins. There
+is no build step, `npm install`, login, API setup, companion app, or companion
+CLI required for normal use.
 
-There is no build step, npm install, login, API setup, or companion CLI required
-for normal use.
+## First-Time Setup
 
-## Setup
-
-1. Open **Settings -> Community plugins -> LJ OS**.
-2. Use the **Get started** setup panel.
-3. Add one or more scan roots, one per line. A scan root can be a folder or
-   drive such as `G:\`.
-4. Click **Discover repositories** to find repos under those scan roots.
-5. Review **Tracked repositories**.
-6. Click **Scan now** to create today's cached JSON.
-7. Run **LJ OS: Insert Today's Git Wall** once when you want the section added
-   to today's note. Insert reads cached JSON only and does not wait for Git.
+1. Install and enable the plugin.
+2. Open **Settings -> Community plugins -> LJ OS**.
+3. Use the **Git Started** setup card.
+4. Add one or more **Scan roots** or exact repo paths.
+5. Click **Discover repositories**.
+6. Review **Tracked repositories**.
+7. Click **Scan now** once to create today's cached JSON.
+8. Confirm startup and interval automation are enabled.
+9. Run **LJ OS: Insert Today's Git Wall** to add the section to today's note.
 
 Fastest setup: add your main repo folder or drive, click **Discover
 repositories**, then click **Scan now**.
 
-Auto-scan is enabled by default. LJ OS scans on startup, then every 60 minutes
-while Obsidian is open. It also checks stale data when today's LJ OS note or an
-existing LJ OS section opens.
+After repos exist, the setup card changes to **Setup Complete ☑️**. Normal use
+is automatic: LJ OS scans quietly in the background and Daily Note insertion
+renders cached data immediately.
 
-You can also run **LJ OS: Scan Configured Git Repositories** to update the local
-JSON without inserting the Daily Note section. That command is optional and is
-mainly useful as a fallback.
+## Scan Roots vs Tracked Repositories
 
-## Discovery And Auto-Scan
+This distinction matters.
 
-Discovery is manual: you decide which folders or drives LJ OS should search by
-adding them as scan roots. A scan root such as `G:\` is not scanned as a repo
-unless `G:\.git` exists. Click **Discover repositories** to search up to 3
-folders deep for child repos like `G:\obsidian-lj-os-plugin\.git` and add them
-to tracked repositories.
+**Scan roots** are folders or drives LJ OS searches when you click **Discover
+repositories**.
 
-Tracked repositories are the exact repos LJ OS scans automatically. Remove a
-tracked repo path to disable it. Auto-scan never crawls scan roots, walks all
-drives, or rediscover repos on each interval.
+```text
+G:\
+C:\Repos
+D:\Client Work
+```
 
-Auto-scan only scans those enabled tracked repos. Its default target is 30
-seconds. If a repo is slow or unavailable, LJ OS records a warning, saves useful
-partial data when possible, and future scans can still run.
+**Tracked repositories** are validated Git repos LJ OS actually scans.
 
-Git Wall insertion never scans. It renders the most recent cached JSON for
-today, including last scan time, duration, trigger, and warning/timeout status
-when present.
+```text
+G:\obsidian-lj-os-plugin
+G:\CannabisMath
+G:\moby-core
+```
 
-Advanced scanning settings are optional and collapsed by default. Most users
-only need scan roots, tracked repositories, automation toggles, and Scan now.
+Use drive roots like `G:\` under **Scan roots**, not **Tracked repositories**.
+`G:\` is not scanned as a repo unless `G:\.git` exists. Broad drive roots can
+take longer to discover; a specific repo parent folder such as `G:\Code` is
+usually faster.
+
+Discovery is manual. Startup, interval, view-open, and manual scans use tracked
+repositories only. They do not crawl scan roots, walk every drive, or rediscover
+repositories.
+
+## Scanning And Caching
+
+Auto-scan is enabled by default:
+
+- **Scan on startup** runs quietly after Obsidian finishes loading.
+- **Auto-scan while Obsidian is open** runs quiet interval scans every 60
+  minutes by default.
+- **Refresh in background when LJ OS view opens** shows cached data first, then
+  refreshes stale scan data quietly for the future.
+
+Manual scans can take several seconds depending on repo count, repo size, disk
+speed, and Git availability. The manual command is explicit:
+
+```text
+LJ OS: Scan Configured Git Repositories
+```
+
+The Git Wall / Daily Note insert command does not scan. It reads today's cached
+JSON if present and renders immediately. If today's JSON is missing, it inserts
+a short fallback message telling you to run a scan or enable automation.
+
+LJ OS has a scan duration budget, defaulting to 30 seconds. Slow or bad repos
+are skipped or recorded as warnings where possible so one repo does not poison
+future scans.
 
 ## Local Storage
 
@@ -104,7 +143,7 @@ Default generated data folder:
 LJ OS/stats
 ```
 
-Default generated JSON path:
+Default daily JSON path:
 
 ```text
 LJ OS/stats/YYYY-MM-DD.json
@@ -124,26 +163,27 @@ normal plugin data storage.
 | Command | Purpose |
 | --- | --- |
 | **LJ OS: Insert Today's Git Wall** | Insert or replace the Daily Note section from today's cached JSON. Does not scan. |
-| **LJ OS: Scan Configured Git Repositories** | Fallback/manual scan of enabled tracked repos without editing a note. |
-| **LJ OS: Discover Repositories** | Search scan roots and add discovered Git repos to tracked repositories. |
+| **LJ OS: Scan Configured Git Repositories** | Explicit fallback scan of enabled tracked repos. |
+| **LJ OS: Discover Repositories** | Search scan roots and add valid child repos to tracked repositories. |
 
 ## Settings
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
 | Git Wall data folder | `LJ OS/stats` | Vault folder where generated activity JSON is stored. |
-| Scan roots | empty | Folders or drives to search manually, such as `G:\`. |
-| Tracked repositories | empty | Exact valid Git repos LJ OS scans automatically. |
+| Scan roots | empty | Folders or drives searched only when you click **Discover repositories**. |
+| Tracked repositories | empty | Validated Git repos LJ OS scans automatically. |
 | Daily note folder | `Daily Notes` | Where dated notes are created or updated. |
-| Scan status | runtime | Compact summary of status, duration, last scan, trigger, tracked repos, failed, and skipped. |
-| Scan on startup | On | Quietly scan after Obsidian finishes loading. |
+| Scan status | runtime | Compact status, duration, last scan, trigger, tracked repos, failed, and skipped counts. |
+| Scan on startup | On | Quiet scan after Obsidian finishes loading. |
 | Auto-scan while Obsidian is open | On | Quiet interval scans of enabled tracked repos. |
-| Scan interval in minutes | `60` | Interval and view-open freshness threshold, minimum `15`. |
-| Refresh in background when LJ OS view opens | On | Shows cached data immediately, then refreshes scan data quietly in the background. |
+| Scan interval in minutes | `60` | Interval and view-open freshness threshold, minimum `15`. Hidden when auto-scan is off. |
+| Refresh in background when LJ OS view opens | On | Shows cached data immediately, then refreshes stale data quietly in the background. |
+| Dashboard Layout | default order | Reorder generated Git Wall sections with **Move up**, **Move down**, and **Reset layout**. |
 | Use emoji | On | Emoji-forward or plain rendered output. |
-| Show summary section | On | Shows or hides summary output. |
+| Show summary section | On | Shows or hides the summary output. |
 | Summary style | `callout` | `callout`, `scoreboard`, or `pit-wall`. |
-| Show repository section | On | Shows or hides repo output. |
+| Show repository section | On | Shows or hides repository output. |
 | Repo view | `table` | `table` or `status-cards`. |
 | Table format | `standard` | `compact`, `standard`, `detailed`, or `emoji-board`. |
 | Show tidy-up section | On | Shows or hides tidy-up output. |
@@ -151,13 +191,27 @@ normal plugin data storage.
 | Show customized label settings | Off | Shows title and section-name fields. |
 | Daily section heading | `## 🧱 Git Wall` | Replacement marker for the Git Wall block. |
 | Summary title | `🏁 Git Wall` | Summary callout title. |
-| Repository section title | `🧰 Repo Garage` | Repo section heading. |
-| Tidy-up section title | `🧹 Tidy-Up Queue` | Queue section heading. |
-| Show advanced scanning settings | Off | Reveals optional scan limits and discovery details. |
-| Max scan duration seconds | `30` | Advanced scan budget before LJ OS saves partial data and warnings. |
+| Repository section title | `🧰 Repo Garage` | Repository section heading. |
+| Tidy-up section title | `🧹 Tidy-Up Queue` | Tidy-up section heading. |
+| Reset labels | action | Restores default Git Wall headings and titles. |
+| Show advanced scanning settings | Off | Reveals optional scan budget and discovery details. |
+| Max scan duration seconds | `30` | Advanced scan budget before LJ OS records warnings and saves partial data when possible. |
 
-Changing the Daily section heading changes the replacement marker. If you change
-it after inserting a Git Wall, delete or rename the old heading once.
+Changing the Daily section heading changes the replacement marker. If you
+change it after inserting a Git Wall, delete or rename the old heading once.
+
+## Dashboard Layout
+
+**Dashboard Layout** controls the order of the main generated sections:
+
+1. Git Scoreboard
+2. Repository Activity
+3. Cleanup Checklist
+
+Use **Move up** and **Move down** to change the output order. Use **Reset
+layout** to restore the default order. This affects generated Git Wall / Daily
+Note output only; it does not affect discovery, scanning, cached JSON storage,
+or section content.
 
 ## Example Output
 
@@ -190,8 +244,8 @@ Scan details: duration 2.5s · trigger interval
 
 ## Generated JSON
 
-LJ OS writes a compact local JSON snapshot each day. It is an implementation
-detail, but it is plain JSON so you can inspect or back it up with your vault.
+LJ OS writes a compact local JSON snapshot each day. It is plain JSON so you
+can inspect it or back it up with your vault.
 
 ```json
 {
@@ -222,7 +276,7 @@ detail, but it is plain JSON so you can inspect or back it up with your vault.
   "repos": [
     {
       "name": "obsidian-lj-os-plugin",
-      "path": "C:/Repos/obsidian-lj-os-plugin",
+      "path": "G:/obsidian-lj-os-plugin",
       "branch": "main",
       "hasCommits": true,
       "touchedToday": true,
@@ -250,7 +304,7 @@ Summary styles:
 - **Scoreboard**: stat table with one metric per row.
 - **Pit Wall**: interpreted status table for activity, cleanup, push, and sync.
 
-Repo views:
+Repository views:
 
 - **Table**: uses the selected table format.
 - **Status Cards**: one Obsidian callout per repo, using success/warning state.
@@ -265,89 +319,73 @@ Table formats:
 Tidy views:
 
 - **Queue**: simple list of repos needing tidy-up.
-- **Shutdown Checklist**: checkbox list for tidy-up, push review, and sync review.
+- **Shutdown Checklist**: checkbox list for tidy-up, push review, and sync
+  review.
 
 All views render from the same vault-local JSON generated by this plugin.
 
-## Privacy
+## Privacy And Local-First Behavior
 
-LJ OS stays local:
+LJ OS itself:
 
-- no login
-- no API keys
-- no remote services
-- no GitHub API
-- no telemetry
-- no cloud calls
-- no file crawling outside configured repo paths
-- no automatic drive-wide discovery
-- local Git metadata only
-- generated activity data stored locally in your vault
+- requires no login
+- requires no API keys
+- uses no APIs or remote services
+- uses no cloud service
+- sends no analytics or telemetry
+- is not spyware
+- has no companion repo
+- has no companion app
+- has no required CLI for normal plugin use
+- performs no remote syncing
+- reads local Git metadata from repositories you configure
+- writes generated JSON inside your vault, defaulting to `LJ OS/stats`
+
+Git may contact remotes only when you use Git outside LJ OS. LJ OS scans local
+metadata and local command output; it does not call remote Git hosting APIs.
+
+## Desktop-Only
+
+LJ OS is marked desktop-only in `manifest.json`. Local filesystem and Git access
+are not mobile-friendly Obsidian plugin capabilities, so mobile support is not
+applicable unless the architecture changes in the future.
 
 ## Troubleshooting
 
-**Nothing inserted into my Daily Note**
+See [Troubleshooting](docs/troubleshooting.md) for common fixes, including:
 
-Add at least one scan root in plugin settings, click **Discover repositories**,
-then run **LJ OS: Insert Today's Git Wall** once to create or update the note
-section.
+- drive roots such as `G:\` being added to the wrong setting
+- no repos discovered
+- Git not available in PATH
+- no Git Wall data yet
+- stale Daily Note output
+- auto-scan not updating
+- release asset mismatch
 
-Insert is cached-data-only. If today's JSON does not exist yet, it inserts a
-short fallback message instead of running Git.
+## Release And Obsidian Submission Checklist
 
-**A repo is listed under Scan Notes**
+Before creating a GitHub release or submitting to Obsidian community plugins:
 
-Check that the configured path exists and points inside a Git work tree. If Git
-is not available to Obsidian, install Git or make sure it is available on PATH.
+- `manifest.json` has the intended plugin version.
+- `package.json` matches `manifest.json` if `package.json` has a `version`.
+- `versions.json` contains the same plugin version key.
+- The GitHub release tag and release name exactly match `manifest.json`
+  `version`.
+- Do not use a `v` prefix for the release tag or name. Use `0.7.3`, not
+  `v0.7.3`, when the manifest version is `0.7.3`.
+- Release assets are individual files: `main.js`, `manifest.json`, and
+  `styles.css` if present.
+- Do not upload only a zip file for Obsidian release assets.
+- `README.md` exists at the repository root and explains purpose and usage.
+- `LICENSE` exists before community submission.
+- The plugin id in `manifest.json` matches the id submitted to
+  `obsidian-releases` `community-plugins.json`.
+- `isDesktopOnly` is accurate and desktop-only behavior is documented.
+- `node --check .\main.js` passes before release.
+- A manual Obsidian install smoke test passes using only the release assets.
 
-**G:\ says it is a scan root**
-
-Expected. `G:\` is a parent folder or drive root, not a repo unless `G:\.git`
-exists. Add it under **Scan roots**, click **Discover repositories**, and LJ OS
-will add valid child repos to **Tracked repositories**.
-
-**Auto-scan seems quiet**
-
-Expected. Startup, interval, and view-open scans do not show success notices.
-Check the settings status fields or `LJ OS/stats/YYYY-MM-DD.json`.
-
-**A scan timed out**
-
-The default budget is 30 seconds. LJ OS saves partial data and warnings when it
-can. Increase **Max scan duration seconds** if your tracked repos need more
-time.
-
-**Wrong Daily Note folder**
-
-Update the **Daily note folder** setting.
-
-**Wrong data folder**
-
-Update the **Git Wall data folder** setting. The plugin writes generated JSON
-there before rendering.
-
-**My old heading still appears**
-
-The Daily section heading setting is used to find and replace the block. If you
-change the heading, delete the old Git Wall section once.
-
-## Release Checklist
-
-Version files for the current release:
-
-- `manifest.json`: `0.7.3`
-- `versions.json`: `0.7.3`
-- `package.json`: `0.7.3`
-
-Required release assets:
-
-```text
-main.js
-manifest.json
-```
-
-Include `styles.css` only if the release contains one. This repo currently does
-not require a stylesheet.
+Known current release-prep gap from this docs audit: this workspace did not
+show a `LICENSE` file. Add one before community plugin submission.
 
 ## More Docs
 

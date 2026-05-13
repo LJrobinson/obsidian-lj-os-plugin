@@ -16,12 +16,6 @@ module.exports = class LjOsPlugin extends Plugin {
       callback: () => this.insertTodaysDynoSheet(),
     });
 
-    this.addCommand({
-      id: "open-todays-dyno-sheet-json",
-      name: "Open Today's Dyno Sheet JSON",
-      callback: () => this.openTodaysDynoSheetJson(),
-    });
-
     this.addSettingTab(new LjOsSettingTab(this.app, this));
   }
 
@@ -48,18 +42,6 @@ module.exports = class LjOsPlugin extends Plugin {
 
   getTodaysDailyNotePath() {
     return joinVaultPath(this.settings.dailyNoteFolder, `${this.getTodayStamp()}.md`);
-  }
-
-  async openTodaysDynoSheetJson() {
-    const dynoSheetPath = this.getTodaysDynoSheetPath();
-    const dynoSheetFile = this.app.vault.getAbstractFileByPath(dynoSheetPath);
-
-    if (!(dynoSheetFile instanceof TFile)) {
-      new Notice("Today's LJ OS dyno sheet has not been generated yet.");
-      return;
-    }
-
-    await this.app.workspace.getLeaf(false).openFile(dynoSheetFile);
   }
 
   async insertTodaysDynoSheet() {
@@ -183,7 +165,7 @@ function renderDynoSheetMarkdown(dynoSheet, heading) {
 
   lines.push((heading || DEFAULT_SETTINGS.dailySectionHeading).trim());
   lines.push("");
-  lines.push(`generatedAt: ${formatScalar(dynoSheet.generatedAt || "Not provided")}`);
+  lines.push(`Generated: ${formatGeneratedAt(dynoSheet.generatedAt)}`);
   lines.push("");
   lines.push("> [!summary] LJ OS Daily Summary");
   lines.push(`> - Repos scanned: ${formatNumber(summary.reposScanned)}`);
@@ -332,6 +314,26 @@ function formatNumber(value) {
 
 function formatBoolean(value) {
   return value ? "Yes" : "No";
+}
+
+function formatGeneratedAt(value) {
+  if (!value) {
+    return "Not provided";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return formatScalar(value);
+  }
+
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
 function formatScalar(value) {

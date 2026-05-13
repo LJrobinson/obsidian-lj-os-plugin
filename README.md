@@ -37,10 +37,13 @@ LJ OS/stats/YYYY-MM-DD.json
 
 - **Insert Today's Dyno Sheet** reads today's JSON dyno sheet, creates today's
   Daily Note if needed, and inserts or replaces the configured LJ OS section.
-- **Open Today's Dyno Sheet JSON** opens today's JSON dyno sheet in Obsidian.
 
 If today's dyno sheet is missing, the plugin shows a Notice that it has not
 been generated yet.
+
+The JSON dyno sheet is internal data produced by `obsidian-lj-os-cli` for this
+plugin. Users normally interact with the rendered LJ OS section in the Daily
+Note, and the plugin does not expose a command for opening raw JSON.
 
 ## Plugin settings
 
@@ -55,8 +58,9 @@ Settings are stored with Obsidian's `loadData` and `saveData` plugin APIs.
 - Reads schema version `0.1.0` JSON dyno sheets from the vault.
 - Uses local calendar dates in `YYYY-MM-DD` format.
 - Writes to `Daily Notes/YYYY-MM-DD.md` by default.
-- Generates markdown with `generatedAt`, a summary callout, repo table,
+- Generates markdown with a readable generated timestamp, a summary callout, repo table,
   cleanup queue, and repo notes.
 - Replaces the configured LJ OS section instead of duplicating it.
+- Does not expose raw JSON viewing or debug-note commands.
 - Does not call Git, access OS telemetry, or use the GitHub API.
 - Does not add external runtime dependencies.

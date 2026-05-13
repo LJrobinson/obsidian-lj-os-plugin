@@ -1,0 +1,9 @@
+{
+  "id": "lj-os",
+  "name": "LJ OS",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Insert LJ OS dyno sheets into Obsidian Daily Notes.",
+  "author": "LJ OS",
+  "isDesktopOnly": false
+}

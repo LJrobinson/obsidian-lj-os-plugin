@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS = {
   tidySectionTitle: "🧹 Tidy-Up Queue",
   useEmoji: true,
   showSummary: true,
+  summaryStyle: "callout",
   showRepoTable: true,
   showTidyQueue: true,
   tableFormat: "standard",
@@ -241,6 +242,21 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Summary style")
+      .setDesc("Choose how the summary is rendered.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("callout", "Callout")
+          .addOption("scoreboard", "Scoreboard")
+          .addOption("hud", "HUD")
+          .setValue(normalizeSummaryStyle(this.plugin.settings.summaryStyle))
+          .onChange(async (value) => {
+            this.plugin.settings.summaryStyle = normalizeSummaryStyle(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Show repository table")
       .setDesc("Render the repository table section.")
       .addToggle((toggle) =>
@@ -290,6 +306,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const summaryTitle = formatTitle(renderSettings.summaryTitle, DEFAULT_SETTINGS.summaryTitle, useEmoji);
   const repoSectionTitle = formatTitle(renderSettings.repoSectionTitle, DEFAULT_SETTINGS.repoSectionTitle, useEmoji);
   const tidySectionTitle = formatTitle(renderSettings.tidySectionTitle, DEFAULT_SETTINGS.tidySectionTitle, useEmoji);
+  const summaryStyle = normalizeSummaryStyle(renderSettings.summaryStyle);
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
@@ -302,7 +319,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
 
   if (showSummary) {
-    blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji));
+    blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
   }
 
   if (showRepoTable) {
@@ -326,7 +343,19 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   return lines.join("\n").trimEnd();
 }
 
-function renderSummaryLines(summary, summaryTitle, useEmoji) {
+function renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle) {
+  if (summaryStyle === "hud") {
+    return [formatSummaryHud(summary, useEmoji)];
+  }
+
+  if (summaryStyle === "scoreboard") {
+    return formatSummaryScoreboard(summary, useEmoji);
+  }
+
+  return formatSummaryCallout(summary, summaryTitle, useEmoji);
+}
+
+function formatSummaryCallout(summary, summaryTitle, useEmoji) {
   return [
     `> [!summary] ${summaryTitle}`,
     `> ${maybeEmoji("🧭", `Scanned: **${formatNumber(summary.reposScanned)}** repos`, useEmoji)}`,
@@ -335,6 +364,39 @@ function renderSummaryLines(summary, summaryTitle, useEmoji) {
     `> ${maybeEmoji("🧼", `Tidy up: **${formatNumber(summary.dirtyRepos)}** repos`, useEmoji)}`,
     `> ${maybeEmoji("🚀", `Unpushed: **${formatNumber(summary.unpushedCommits)}**`, useEmoji)}`,
     `> ${maybeEmoji("📥", `Behind remote: **${formatNumber(summary.behindCommits)}**`, useEmoji)}`,
+  ];
+}
+
+function formatSummaryScoreboard(summary, useEmoji) {
+  const headers = useEmoji
+    ? ["🧭 Scanned", "🛠️ Touched", "🏁 Commits", "🧼 Tidy", "🚀 Unpushed", "📥 Behind"]
+    : ["Scanned", "Touched", "Commits", "Tidy", "Unpushed", "Behind"];
+
+  return [
+    toMarkdownTableRow(headers),
+    "| ---: | ---: | ---: | ---: | ---: | ---: |",
+    toMarkdownTableRow(getSummaryValues(summary)),
+  ];
+}
+
+function formatSummaryHud(summary, useEmoji) {
+  const [scanned, touched, commits, tidy, unpushed, behind] = getSummaryValues(summary);
+
+  if (!useEmoji) {
+    return `Scanned ${scanned} · Touched ${touched} · Commits ${commits} · Tidy ${tidy} · Unpushed ${unpushed} · Behind ${behind}`;
+  }
+
+  return `🧭 ${scanned} · 🛠️ ${touched} · 🏁 ${commits} · 🧼 ${tidy} · 🚀 ${unpushed} · 📥 ${behind}`;
+}
+
+function getSummaryValues(summary) {
+  return [
+    formatNumber(summary.reposScanned),
+    formatNumber(summary.reposTouchedToday),
+    formatNumber(summary.commitsToday),
+    formatNumber(summary.dirtyRepos),
+    formatNumber(summary.unpushedCommits),
+    formatNumber(summary.behindCommits),
   ];
 }
 
@@ -481,6 +543,10 @@ function normalizeRenderSettings(settingsOrHeading) {
 
 function normalizeTableFormat(value) {
   return ["compact", "standard", "detailed", "emoji-board"].includes(value) ? value : DEFAULT_SETTINGS.tableFormat;
+}
+
+function normalizeSummaryStyle(value) {
+  return ["callout", "scoreboard", "hud"].includes(value) ? value : DEFAULT_SETTINGS.summaryStyle;
 }
 
 function sanitizeTextSetting(value, fallback) {

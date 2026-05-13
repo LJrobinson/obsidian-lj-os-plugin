@@ -55,6 +55,8 @@ Note, and the plugin does not expose a command for opening raw JSON.
 - **Tidy-up section title** defaults to `🧹 Tidy-Up Queue`.
 - **Use emoji** defaults to on.
 - **Show summary** defaults to on.
+- **Summary style** defaults to `callout`; allowed values are `callout`,
+  `scoreboard`, and `hud`.
 - **Show repository table** defaults to on.
 - **Show tidy-up queue** defaults to on.
 - **Table format** defaults to `standard`; allowed values are `compact`,
@@ -81,6 +83,40 @@ three are hidden, the rendered section falls back to:
 
 ```markdown
 No LJ OS sections are enabled.
+```
+
+## Summary styles
+
+`callout` keeps the default summary block:
+
+```markdown
+> [!summary] 🏁 Git Wall
+> 🧭 Scanned: **23** repos
+> 🛠️ Touched: **4** repos
+> 🏁 Commits: **26**
+> 🧼 Tidy up: **5** repos
+> 🚀 Unpushed: **0**
+> 📥 Behind remote: **0**
+```
+
+`scoreboard` renders a compact table:
+
+```markdown
+| 🧭 Scanned | 🛠️ Touched | 🏁 Commits | 🧼 Tidy | 🚀 Unpushed | 📥 Behind |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 23 | 4 | 26 | 5 | 0 | 0 |
+```
+
+`hud` renders a single line:
+
+```markdown
+🧭 23 · 🛠️ 4 · 🏁 26 · 🧼 5 · 🚀 0 · 📥 0
+```
+
+With emoji mode off, `hud` renders:
+
+```markdown
+Scanned 23 · Touched 4 · Commits 26 · Tidy 5 · Unpushed 0 · Behind 0
 ```
 
 ## Table formats

@@ -1,8 +1,41 @@
 const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath } = require("obsidian");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { execFile } = require("child_process");
+
+const GIT_SHEET_SCHEMA_VERSION = "0.3.0";
+const GIT_SHEET_SOURCE = "obsidian-lj-os-plugin";
+const MIN_AUTO_SCAN_INTERVAL_MINUTES = 15;
+const DEFAULT_MAX_SCAN_DURATION_SECONDS = 30;
+const MIN_MAX_SCAN_DURATION_SECONDS = 5;
+const RECENT_AUTO_SCAN_SKIP_MS = 60 * 1000;
+const VIEW_OPEN_SCAN_DEBOUNCE_MS = 60 * 1000;
+const DEFAULT_DISCOVERY_DEPTH = 3;
+const DEFAULT_DISCOVERY_MAX_DIRECTORIES = 2000;
+const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
+  "node_modules",
+  ".obsidian",
+  ".git",
+  "appdata",
+  "windows",
+  "program files",
+  "program files (x86)",
+  "$recycle.bin",
+  "system volume information",
+]);
 
 const DEFAULT_SETTINGS = {
   dynoSheetFolder: "LJ OS/stats",
   dailyNoteFolder: "Daily Notes",
+  repoPaths: [],
+  scanRoots: [],
+  trackedRepoPaths: [],
+  scanOnStartup: true,
+  autoScanEnabled: true,
+  autoScanIntervalMinutes: 60,
+  scanOnViewOpen: true,
+  maxScanDurationSeconds: DEFAULT_MAX_SCAN_DURATION_SECONDS,
   dailySectionHeading: "## 🧱 Git Wall",
   summaryTitle: "🏁 Git Wall",
   repoSectionTitle: "🧰 Repo Garage",
@@ -16,10 +49,16 @@ const DEFAULT_SETTINGS = {
   tidyView: "queue",
   tableFormat: "standard",
   showAdvancedSettings: false,
+  showAdvancedScanningSettings: false,
 };
 
 module.exports = class LjOsPlugin extends Plugin {
   async onload() {
+    this.autoScanIntervalId = null;
+    this.startupScanTimeoutId = null;
+    this.lastViewOpenScanRequestedAt = 0;
+    this.suppressViewOpenScanUntil = 0;
+
     await this.loadSettings();
 
     this.addCommand({
@@ -28,7 +67,23 @@ module.exports = class LjOsPlugin extends Plugin {
       callback: () => this.insertTodaysGitSheet(),
     });
 
-    this.addSettingTab(new LjOsSettingTab(this.app, this));
+    this.addCommand({
+      id: "scan-configured-git-repositories",
+      name: "Scan Configured Git Repositories",
+      callback: () => this.scanTodaysGitSheet({ showNotice: true }),
+    });
+
+    this.addCommand({
+      id: "discover-git-repositories",
+      name: "Discover Repositories",
+      callback: () => this.discoverRepositories({ showNotice: true }),
+    });
+
+    this.settingTab = new LjOsSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
+    this.registerViewOpenScanHandler();
+    this.setupAutoScanTimer();
+    this.scheduleStartupScan();
   }
 
   async loadSettings() {
@@ -38,9 +93,28 @@ module.exports = class LjOsPlugin extends Plugin {
     if (hasOwn(savedSettings, "gitSheetFolder") && !hasOwn(savedSettings, "dynoSheetFolder")) {
       this.settings.dynoSheetFolder = savedSettings.gitSheetFolder;
     }
+
+    const migratedPaths = migrateConfiguredPaths(savedSettings);
+    this.settings.scanRoots = migratedPaths.scanRoots;
+    this.settings.trackedRepoPaths = migratedPaths.trackedRepoPaths;
+    this.settings.repoPaths = [];
+    this.settings.autoScanIntervalMinutes = normalizeAutoScanIntervalMinutes(this.settings.autoScanIntervalMinutes);
+    this.settings.maxScanDurationSeconds = normalizeMaxScanDurationSeconds(
+      hasOwn(savedSettings, "maxScanDurationSeconds") ? savedSettings.maxScanDurationSeconds : DEFAULT_MAX_SCAN_DURATION_SECONDS
+    );
+    this.settings.scanOnStartup = savedSettings.scanOnStartup !== false;
+    this.settings.autoScanEnabled = savedSettings.autoScanEnabled !== false;
+    this.settings.scanOnViewOpen = savedSettings.scanOnViewOpen !== false;
+    this.settings.showAdvancedScanningSettings = savedSettings.showAdvancedScanningSettings === true;
+    this.scanState = normalizeScanState(savedSettings.scanState);
+    if (this.scanState.isScanRunning) {
+      this.scanState.lastScanStatus = "interrupted: previous scan did not finish";
+    }
+    this.scanState.isScanRunning = false;
   }
 
   async saveSettings() {
+    this.settings.scanState = this.scanState;
     await this.saveData(this.settings);
   }
 
@@ -61,28 +135,111 @@ module.exports = class LjOsPlugin extends Plugin {
     return joinVaultPath(this.settings.dailyNoteFolder, `${this.getTodayStamp()}.md`);
   }
 
-  async insertTodaysGitSheet() {
+  async scanTodaysGitSheet(options = {}) {
+    const trigger = normalizeScanTrigger(options.trigger || "manual");
+    const isAutomatic = trigger !== "manual";
+    const repoPaths = normalizeRepoPaths(this.settings.trackedRepoPaths);
+    const scanRoots = normalizeRepoPaths(this.settings.scanRoots);
+
+    if (this.scanState.isScanRunning) {
+      const message = "LJ OS scan already running. Skipped starting another scan.";
+      this.updateScanState({ lastScanStatus: "skipped: scan already running" });
+
+      if (options.showNotice) {
+        new Notice(message);
+      }
+
+      return null;
+    }
+
+    if (isAutomatic && this.wasScanCompletedRecently(RECENT_AUTO_SCAN_SKIP_MS)) {
+      this.updateScanState({ lastScanStatus: "skipped: recent scan" });
+      return null;
+    }
+
+    if (repoPaths.length === 0) {
+      this.updateScanState({ lastScanStatus: "skipped: no tracked repositories" });
+
+      if (options.showNotice) {
+        new Notice(
+          scanRoots.length > 0
+            ? "No tracked repos found yet. Run Discover repositories first."
+            : "Add a scan root or tracked Git repository in LJ OS settings."
+        );
+      }
+
+      return null;
+    }
+
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    this.updateScanState({
+      isScanRunning: true,
+      lastScanStartedAt: startedAt,
+      lastScanTrigger: trigger,
+      lastScanStatus: `running: ${trigger}`,
+    });
+
+    try {
+      const gitSheet = await scanConfiguredRepositories(repoPaths, this.getTodayStamp(), {
+        trigger,
+        maxDurationSeconds: this.settings.maxScanDurationSeconds,
+      });
+
+      await this.writeGitSheet(gitSheet);
+      this.completeScanState(gitSheet, startedAtMs);
+
+      if (options.showNotice) {
+        new Notice(formatManualScanNotice(gitSheet, this.getTodaysGitSheetPath()));
+      }
+
+      return gitSheet;
+    } catch (error) {
+      console.error("Failed to save LJ OS Git Wall JSON", error);
+      const completedAt = new Date().toISOString();
+      this.updateScanState({
+        isScanRunning: false,
+        lastScanCompletedAt: completedAt,
+        lastScanDurationMs: Date.now() - startedAtMs,
+        lastScanTrigger: trigger,
+        lastScanStatus: `failed: ${formatGitError(error)}`,
+      });
+
+      if (options.showNotice) {
+        new Notice("Today's LJ OS Git Wall data could not be saved.");
+      }
+
+      return null;
+    } finally {
+      if (this.scanState.isScanRunning && this.scanState.lastScanStartedAt === startedAt) {
+        this.updateScanState({ isScanRunning: false });
+      }
+    }
+  }
+
+  async writeGitSheet(gitSheet) {
     const gitSheetPath = this.getTodaysGitSheetPath();
+    const gitSheetFolder = getFolderPart(gitSheetPath);
+
+    await ensureFolder(this.app.vault, gitSheetFolder);
+
     const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
+    const content = `${JSON.stringify(gitSheet, null, 2)}\n`;
+
+    if (!gitSheetFile) {
+      await this.app.vault.create(gitSheetPath, content);
+      return;
+    }
 
     if (!(gitSheetFile instanceof TFile)) {
-      new Notice("Today's LJ OS Git Wall data has not been generated yet.");
-      return;
+      throw new Error(`Cannot save Git Wall data because ${gitSheetPath} is not a file.`);
     }
 
-    let gitSheet;
-    try {
-      gitSheet = JSON.parse(await this.app.vault.read(gitSheetFile));
-    } catch (error) {
-      console.error("Failed to parse LJ OS Git Wall JSON", error);
-      new Notice("Today's LJ OS Git Wall data could not be parsed.");
-      return;
-    }
+    await this.app.vault.modify(gitSheetFile, content);
+  }
 
-    if (!gitSheet || typeof gitSheet !== "object") {
-      new Notice("Today's LJ OS Git Wall data is not a valid JSON object.");
-      return;
-    }
+  async insertTodaysGitSheet() {
+    const gitSheet = await this.readTodaysGitSheet();
 
     const dailyNotePath = this.getTodaysDailyNotePath();
     const dailyNoteFolder = getFolderPart(dailyNotePath);
@@ -112,12 +269,215 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     const existingContent = await this.app.vault.read(dailyNoteFile);
-    const sectionMarkdown = renderGitSheetMarkdown(gitSheet, this.settings);
+    const sectionMarkdown = gitSheet
+      ? renderGitSheetMarkdown(gitSheet, this.settings)
+      : renderMissingGitSheetMarkdown(this.settings);
     const updatedContent = upsertSection(existingContent, this.settings.dailySectionHeading, sectionMarkdown);
 
     await this.app.vault.modify(dailyNoteFile, updatedContent);
+    this.suppressViewOpenScanUntil = Date.now() + 2000;
     await this.app.workspace.getLeaf(false).openFile(dailyNoteFile);
-    new Notice("Inserted today's LJ OS Git Wall.");
+    new Notice(gitSheet ? "Inserted cached LJ OS Git Wall data." : "Inserted LJ OS Git Wall fallback. No scan data found for today.");
+  }
+
+  async readTodaysGitSheet() {
+    const gitSheetPath = this.getTodaysGitSheetPath();
+    const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
+
+    if (!(gitSheetFile instanceof TFile)) {
+      return null;
+    }
+
+    try {
+      const gitSheet = JSON.parse(await this.app.vault.read(gitSheetFile));
+      return gitSheet && typeof gitSheet === "object" ? gitSheet : null;
+    } catch (error) {
+      console.error("Failed to parse existing LJ OS Git Wall JSON", error);
+      return null;
+    }
+  }
+
+  async discoverRepositories(options = {}) {
+    const scanRoots = normalizeRepoPaths(this.settings.scanRoots);
+
+    if (scanRoots.length === 0) {
+      if (options.showNotice) {
+        new Notice("Add at least one scan root or exact repo path first.");
+      }
+
+      return null;
+    }
+
+    const discovery = discoverGitRepositories(scanRoots, {
+      maxDepth: DEFAULT_DISCOVERY_DEPTH,
+      maxDurationSeconds: this.settings.maxScanDurationSeconds,
+    });
+    const beforeCount = normalizeRepoPaths(this.settings.trackedRepoPaths).length;
+    this.settings.trackedRepoPaths = mergeUniquePaths(this.settings.trackedRepoPaths, discovery.repositories);
+    const afterCount = this.settings.trackedRepoPaths.length;
+    await this.saveSettings();
+    this.refreshSettingsDisplay();
+
+    if (options.showNotice) {
+      const addedCount = afterCount - beforeCount;
+      new Notice(`Discovered ${discovery.repositories.length} repositories from ${scanRoots.length} scan roots. Added ${addedCount} new.`);
+    }
+
+    if (discovery.warnings.length > 0) {
+      console.warn("LJ OS repository discovery warnings", discovery.warnings);
+    }
+
+    return discovery;
+  }
+
+  setupAutoScanTimer() {
+    this.clearAutoScanTimer();
+
+    if (this.settings.autoScanEnabled === false) {
+      return;
+    }
+
+    const intervalMs = normalizeAutoScanIntervalMinutes(this.settings.autoScanIntervalMinutes) * 60 * 1000;
+    this.autoScanIntervalId = window.setInterval(() => {
+      this.scanTodaysGitSheet({ trigger: "interval" });
+    }, intervalMs);
+    this.registerInterval(this.autoScanIntervalId);
+  }
+
+  clearAutoScanTimer() {
+    if (!this.autoScanIntervalId) {
+      return;
+    }
+
+    window.clearInterval(this.autoScanIntervalId);
+    this.autoScanIntervalId = null;
+  }
+
+  scheduleStartupScan() {
+    if (this.settings.scanOnStartup === false) {
+      return;
+    }
+
+    this.app.workspace.onLayoutReady(() => {
+      this.startupScanTimeoutId = window.setTimeout(() => {
+        this.scanTodaysGitSheet({ trigger: "startup" });
+      }, 1000);
+      this.register(() => window.clearTimeout(this.startupScanTimeoutId));
+    });
+  }
+
+  registerViewOpenScanHandler() {
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        this.maybeScanOnViewOpen(file);
+      })
+    );
+  }
+
+  async maybeScanOnViewOpen(file) {
+    if (this.settings.scanOnViewOpen === false || !(file instanceof TFile) || file.extension !== "md") {
+      return;
+    }
+
+    if (Date.now() < this.suppressViewOpenScanUntil) {
+      return;
+    }
+
+    if (!this.isScanDataStale()) {
+      return;
+    }
+
+    if (Date.now() - this.lastViewOpenScanRequestedAt < VIEW_OPEN_SCAN_DEBOUNCE_MS) {
+      return;
+    }
+
+    const isTodaysDailyNote = file.path === this.getTodaysDailyNotePath();
+    let isLjOsView = isTodaysDailyNote;
+
+    if (!isLjOsView) {
+      try {
+        const content = await this.app.vault.cachedRead(file);
+        isLjOsView = findSectionRanges(content, this.settings.dailySectionHeading).length > 0;
+      } catch (error) {
+        return;
+      }
+    }
+
+    if (!isLjOsView || !this.isScanDataStale()) {
+      return;
+    }
+
+    this.lastViewOpenScanRequestedAt = Date.now();
+    this.scheduleBackgroundScan("view-open");
+  }
+
+  scheduleBackgroundScan(trigger) {
+    const timeoutId = window.setTimeout(() => {
+      this.scanTodaysGitSheet({ trigger }).catch((error) => console.error("LJ OS background scan failed", error));
+    }, 250);
+
+    this.register(() => window.clearTimeout(timeoutId));
+  }
+
+  isScanDataStale() {
+    const lastSuccessfulAt = this.scanState.lastSuccessfulScanCompletedAt || this.scanState.lastScanCompletedAt;
+    if (!lastSuccessfulAt) {
+      return true;
+    }
+
+    const lastSuccessfulMs = Date.parse(lastSuccessfulAt);
+    if (!Number.isFinite(lastSuccessfulMs)) {
+      return true;
+    }
+
+    return Date.now() - lastSuccessfulMs >= this.getFreshnessThresholdMs();
+  }
+
+  getFreshnessThresholdMs() {
+    return Math.max(
+      MIN_AUTO_SCAN_INTERVAL_MINUTES,
+      normalizeAutoScanIntervalMinutes(this.settings.autoScanIntervalMinutes)
+    ) * 60 * 1000;
+  }
+
+  wasScanCompletedRecently(thresholdMs) {
+    const completedAt = this.scanState.lastScanCompletedAt;
+    const completedMs = Date.parse(completedAt || "");
+    return Number.isFinite(completedMs) && Date.now() - completedMs < thresholdMs;
+  }
+
+  completeScanState(gitSheet, startedAtMs) {
+    const metadata = getGitSheetMetadata(gitSheet);
+    const status = formatCompletedScanStatus(metadata);
+
+    this.updateScanState({
+      isScanRunning: false,
+      lastScanCompletedAt: metadata.scanCompletedAt || new Date().toISOString(),
+      lastSuccessfulScanCompletedAt: metadata.scanCompletedAt || new Date().toISOString(),
+      lastScanDurationMs: metadata.durationMs || Date.now() - startedAtMs,
+      lastScanTrigger: metadata.scanTrigger,
+      lastRepoCount: metadata.repoCount,
+      lastScannedRepoCount: metadata.scannedRepoCount,
+      lastSkippedRepoCount: metadata.skippedRepoCount,
+      lastFailedRepoCount: metadata.failedRepoCount,
+      lastScanTimedOut: metadata.timedOut,
+      lastScanStatus: status,
+    });
+  }
+
+  updateScanState(patch) {
+    this.scanState = normalizeScanState(Object.assign({}, this.scanState, patch));
+    this.settings.scanState = this.scanState;
+    this.saveData(this.settings).catch((error) => console.error("Failed to save LJ OS scan state", error));
+    this.refreshSettingsDisplay();
+  }
+
+  refreshSettingsDisplay() {
+    const containerEl = this.settingTab && this.settingTab.containerEl;
+
+    if (containerEl && typeof containerEl.isShown === "function" && containerEl.isShown()) {
+      this.settingTab.display();
+    }
   }
 };
 
@@ -130,13 +490,29 @@ class LjOsSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    const scanRoots = normalizeRepoPaths(this.plugin.settings.scanRoots);
+    const trackedRepoPaths = normalizeRepoPaths(this.plugin.settings.trackedRepoPaths);
 
     new Setting(containerEl).setName("LJ OS").setHeading();
-    new Setting(containerEl).setName("Paths").setHeading();
+    new Setting(containerEl).setName("Setup").setHeading();
+
+    renderSetupCard(containerEl, this.plugin, scanRoots, trackedRepoPaths);
+
+    renderFullWidthPathTextareaSetting(containerEl, {
+      label: "Scan roots",
+      description: "Folders or drives LJ OS searches for Git repositories. Example: G:\\.",
+      placeholder: "G:\\\nC:\\Repos",
+      rows: 1,
+      value: formatRepoPathsForSettings(this.plugin.settings.scanRoots),
+      onChange: async (value) => {
+        this.plugin.settings.scanRoots = normalizeRepoPaths(value);
+        await this.plugin.saveSettings();
+      },
+    });
 
     new Setting(containerEl)
       .setName("Git Wall data folder")
-      .setDesc("Vault-relative folder containing LJ OS JSON data from the CLI.")
+      .setDesc("Vault-relative folder where LJ OS stores generated Git activity JSON.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.dynoSheetFolder)
@@ -149,7 +525,7 @@ class LjOsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Daily note folder")
-      .setDesc("Vault-relative folder where Daily Notes are stored.")
+      .setDesc("Vault-relative folder where dated notes are created or updated.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.dailyNoteFolder)
@@ -160,7 +536,82 @@ class LjOsSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl).setName("Display").setHeading();
+    new Setting(containerEl).setName("Tracked Repositories").setHeading();
+
+    renderFullWidthPathTextareaSetting(containerEl, {
+      label: "Repositories LJ OS scans",
+      description: "Validated Git repos LJ OS scans automatically.",
+      placeholder: "G:\\obsidian-lj-os-plugin\nG:\\CannabisMath\nG:\\trackingthc.com",
+      rows: 3,
+      value: formatRepoPathsForSettings(this.plugin.settings.trackedRepoPaths),
+      onChange: async (value) => {
+        this.plugin.settings.trackedRepoPaths = normalizeRepoPaths(value);
+        await this.plugin.saveSettings();
+      },
+    });
+
+    new Setting(containerEl).setName("Automation").setHeading();
+
+    renderScanStatusSummary(containerEl, this.plugin, trackedRepoPaths);
+
+    new Setting(containerEl)
+      .setName("Scan on startup")
+      .setDesc("Quietly scan enabled tracked repos shortly after Obsidian finishes loading.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.scanOnStartup !== false).onChange(async (value) => {
+          this.plugin.settings.scanOnStartup = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto-scan while Obsidian is open")
+      .setDesc("Run quiet interval scans in the background. Manual scan remains available as a fallback.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoScanEnabled !== false).onChange(async (value) => {
+          this.plugin.settings.autoScanEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.setupAutoScanTimer();
+          this.display();
+        })
+      );
+
+    if (this.plugin.settings.autoScanEnabled !== false) {
+      new Setting(containerEl)
+        .setName("Scan interval in minutes")
+        .setDesc(`Minimum ${MIN_AUTO_SCAN_INTERVAL_MINUTES} minutes. This controls interval scans and view-open freshness.`)
+        .addText((text) =>
+          text
+            .setPlaceholder(String(DEFAULT_SETTINGS.autoScanIntervalMinutes))
+            .setValue(String(normalizeAutoScanIntervalMinutes(this.plugin.settings.autoScanIntervalMinutes)))
+            .onChange(async (value) => {
+              this.plugin.settings.autoScanIntervalMinutes = normalizeAutoScanIntervalMinutes(value);
+              await this.plugin.saveSettings();
+              this.plugin.setupAutoScanTimer();
+            })
+        );
+    }
+
+    new Setting(containerEl)
+      .setName("Refresh in background when LJ OS view opens")
+      .setDesc("Shows cached data immediately, then quietly refreshes scan data in the background.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.scanOnViewOpen !== false).onChange(async (value) => {
+          this.plugin.settings.scanOnViewOpen = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Scan repositories now")
+      .setDesc("Runs a scan now. Normally LJ OS updates automatically in the background.")
+      .addButton((button) =>
+        button.setButtonText("Scan now").setCta().onClick(async () => {
+          await this.plugin.scanTodaysGitSheet({ trigger: "manual", showNotice: true });
+        })
+      );
+
+    new Setting(containerEl).setName("Customize Display").setHeading();
 
     new Setting(containerEl)
       .setName("Use emoji")
@@ -288,11 +739,8 @@ class LjOsSettingTab extends PluginSettingTab {
         })
       );
 
-    if (!this.plugin.settings.showAdvancedSettings) {
-      return;
-    }
-
-    new Setting(containerEl)
+    if (this.plugin.settings.showAdvancedSettings) {
+      new Setting(containerEl)
       .setName("Daily section heading")
       .setDesc("Exact Markdown heading used to find and replace the existing section.")
       .addText((text) =>
@@ -357,7 +805,204 @@ class LjOsSettingTab extends PluginSettingTab {
           this.display();
         })
       );
+    }
+
+    new Setting(containerEl).setName("Advanced Scanning Settings").setHeading();
+
+    new Setting(containerEl)
+      .setName("Show advanced scanning settings")
+      .setDesc("Optional scan limits and discovery details.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showAdvancedScanningSettings === true).onChange(async (value) => {
+          this.plugin.settings.showAdvancedScanningSettings = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    if (this.plugin.settings.showAdvancedScanningSettings) {
+      new Setting(containerEl)
+        .setName("Max scan duration seconds")
+        .setDesc("Default target is 30 seconds. If the budget is exceeded, LJ OS saves useful partial data and records warnings.")
+        .addText((text) =>
+          text
+            .setPlaceholder(String(DEFAULT_SETTINGS.maxScanDurationSeconds))
+            .setValue(String(normalizeMaxScanDurationSeconds(this.plugin.settings.maxScanDurationSeconds)))
+            .onChange(async (value) => {
+              this.plugin.settings.maxScanDurationSeconds = normalizeMaxScanDurationSeconds(value);
+              await this.plugin.saveSettings();
+            })
+        );
+
+      renderAdvancedScanningDetails(containerEl);
+    }
   }
+}
+
+function renderSetupCard(containerEl, plugin, scanRoots, trackedRepoPaths) {
+  const hasTrackedRepos = trackedRepoPaths.length > 0;
+  const panel = createCompactPanel(containerEl, hasTrackedRepos ? "Setup Complete ☑️" : "Git Started");
+  const copy = document.createElement("p");
+  copy.textContent = hasTrackedRepos
+    ? `LJ OS is tracking ${trackedRepoPaths.length} repos. It will keep cached Git Wall data fresh in the background.`
+    : "Point LJ OS at the folders or drives where your Git repos live. LJ OS will discover repos, track the ones you enable, then keep your Git Wall updated automatically.";
+  panel.appendChild(copy);
+
+  if (!hasTrackedRepos) {
+    const steps = document.createElement("ol");
+    for (const step of [
+      "Add scan roots or exact repo paths.",
+      "Discover repositories.",
+      "Review tracked repositories.",
+      "Enable automation.",
+      "Run first scan.",
+    ]) {
+      const item = document.createElement("li");
+      item.textContent = step;
+      steps.appendChild(item);
+    }
+    panel.appendChild(steps);
+  }
+
+  const hint = document.createElement("p");
+  hint.textContent = "Fastest setup: add your main repo folder or drive, click Discover repositories, then click Scan now.";
+  hint.style.marginBottom = "0";
+  panel.appendChild(hint);
+
+  const actions = document.createElement("div");
+  actions.style.display = "flex";
+  actions.style.flexWrap = "wrap";
+  actions.style.gap = "8px";
+  actions.style.marginTop = "10px";
+  panel.appendChild(actions);
+
+  actions.appendChild(createActionButton("Discover repositories", () => plugin.discoverRepositories({ showNotice: true }), true));
+
+  if (hasTrackedRepos) {
+    actions.appendChild(createActionButton("Scan now", () => plugin.scanTodaysGitSheet({ trigger: "manual", showNotice: true }), false));
+  }
+
+  if (scanRoots.length > 0 || trackedRepoPaths.length > 0) {
+    const counts = document.createElement("p");
+    counts.textContent = `${scanRoots.length} scan roots · ${trackedRepoPaths.length} tracked repos`;
+    counts.style.margin = "8px 0 0";
+    counts.style.fontSize = "12px";
+    counts.style.opacity = "0.75";
+    panel.appendChild(counts);
+  }
+}
+
+function renderFullWidthPathTextareaSetting(containerEl, options) {
+  const panel = createCompactPanel(containerEl, options.label);
+  const description = document.createElement("div");
+  description.textContent = options.description;
+  description.style.fontSize = "12px";
+  description.style.opacity = "0.75";
+  description.style.margin = "-2px 0 8px";
+  panel.appendChild(description);
+
+  const textarea = document.createElement("textarea");
+  textarea.rows = options.rows;
+  textarea.placeholder = options.placeholder;
+  textarea.value = options.value;
+  textarea.style.boxSizing = "border-box";
+  textarea.style.width = "100%";
+  textarea.style.minWidth = "100%";
+  textarea.addEventListener("change", async () => {
+    await options.onChange(textarea.value);
+  });
+  panel.appendChild(textarea);
+}
+
+function renderScanStatusSummary(containerEl, plugin, trackedRepoPaths) {
+  const state = plugin.scanState || {};
+  const panel = createCompactPanel(containerEl, "Scan Status");
+  const primary = document.createElement("p");
+  const lastScan = formatTimestampForSettings(state.lastSuccessfulScanCompletedAt || state.lastScanCompletedAt);
+  const duration = formatScanStateDuration(state);
+  const status = formatScanStatusLabel(state.lastScanStatus);
+  const pieces = [status];
+
+  if (duration !== "Not available") {
+    pieces.push(duration);
+  }
+
+  if (lastScan !== "Not available") {
+    pieces.push(`Last scan: ${lastScan}`);
+  }
+
+  primary.textContent = pieces.join(" · ");
+  primary.style.marginBottom = "6px";
+  panel.appendChild(primary);
+
+  const secondary = document.createElement("p");
+  const failedCount = toNumber(state.lastFailedRepoCount);
+  const skippedCount = toNumber(state.lastSkippedRepoCount);
+  const trigger = formatScalar(state.lastScanTrigger);
+  const repoCount = trackedRepoPaths.length;
+  const secondaryPieces = [`Tracked repos: ${repoCount} enabled`, `Failed: ${failedCount}`, `Skipped: ${skippedCount}`];
+
+  if (trigger) {
+    secondaryPieces.push(`Trigger: ${trigger}`);
+  }
+
+  if (state.lastScanTimedOut) {
+    secondaryPieces.push("Timed out");
+  }
+
+  secondary.textContent = secondaryPieces.join(" · ");
+  secondary.style.margin = "0";
+  secondary.style.fontSize = "12px";
+  secondary.style.opacity = "0.8";
+  panel.appendChild(secondary);
+}
+
+function renderAdvancedScanningDetails(containerEl) {
+  const panel = createCompactPanel(containerEl, "Discovery Details");
+  const details = document.createElement("p");
+  details.textContent = `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, .obsidian, .git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`;
+  details.style.margin = "0";
+  panel.appendChild(details);
+}
+
+function createCompactPanel(containerEl, title) {
+  const panel = document.createElement("div");
+  panel.style.border = "1px solid var(--background-modifier-border)";
+  panel.style.borderRadius = "8px";
+  panel.style.padding = "12px";
+  panel.style.margin = "8px 0 14px";
+  panel.style.background = "var(--background-secondary)";
+
+  const heading = document.createElement("div");
+  heading.textContent = title;
+  heading.style.fontWeight = "600";
+  heading.style.marginBottom = "6px";
+  panel.appendChild(heading);
+  containerEl.appendChild(panel);
+  return panel;
+}
+
+function createActionButton(label, onClick, isPrimary) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  if (isPrimary) {
+    button.classList.add("mod-cta");
+  }
+  button.addEventListener("click", () => {
+    Promise.resolve(onClick()).catch((error) => console.error("LJ OS action failed", error));
+  });
+  return button;
+}
+
+function formatScanStatusLabel(value) {
+  const text = formatScalar(value);
+
+  if (!text) {
+    return "Not scanned yet";
+  }
+
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
@@ -367,6 +1012,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const repos = Array.isArray(gitSheet.repos) ? gitSheet.repos : [];
   const dirtyRepos = repos.filter((repo) => Boolean(repo.dirty));
   const reposWithNotes = repos.filter((repo) => hasNotes(repo.notes));
+  const sheetNotes = normalizeNotes(gitSheet.notes);
   const summaryTitle = formatTitle(renderSettings.summaryTitle, DEFAULT_SETTINGS.summaryTitle, useEmoji);
   const repoSectionTitle = formatTitle(renderSettings.repoSectionTitle, DEFAULT_SETTINGS.repoSectionTitle, useEmoji);
   const tidySectionTitle = formatTitle(renderSettings.tidySectionTitle, DEFAULT_SETTINGS.tidySectionTitle, useEmoji);
@@ -383,6 +1029,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push((renderSettings.dailySectionHeading || DEFAULT_SETTINGS.dailySectionHeading).trim());
   lines.push("");
   lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
+  lines.push(...formatScanMetadataLines(gitSheet));
 
   if (showSummary) {
     blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
@@ -396,6 +1043,10 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
     blocks.push(renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji, tidyView));
   }
 
+  if (sheetNotes.length > 0) {
+    blocks.push(renderScanNotesLines(sheetNotes));
+  }
+
   if (blocks.length === 0) {
     lines.push("");
     lines.push("No LJ OS sections are enabled.");
@@ -407,6 +1058,47 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   }
 
   return lines.join("\n").trimEnd();
+}
+
+function renderMissingGitSheetMarkdown(settingsOrHeading) {
+  const renderSettings = normalizeRenderSettings(settingsOrHeading);
+  const lines = [
+    (renderSettings.dailySectionHeading || DEFAULT_SETTINGS.dailySectionHeading).trim(),
+    "",
+    "No LJ OS scan data found for today yet. Run `LJ OS: Scan Configured Git Repositories` or enable startup/interval scanning.",
+  ];
+
+  return lines.join("\n").trimEnd();
+}
+
+function formatScanMetadataLines(gitSheet) {
+  const metadata = getGitSheetMetadata(gitSheet);
+  const lines = [];
+
+  if (metadata.scanCompletedAt) {
+    lines.push(`Last scan: ${formatGeneratedAt(metadata.scanCompletedAt)}`);
+  }
+
+  const details = [];
+  if (metadata.durationMs > 0) {
+    details.push(`duration ${formatDurationMs(metadata.durationMs)}`);
+  }
+
+  if (metadata.scanTrigger) {
+    details.push(`trigger ${metadata.scanTrigger}`);
+  }
+
+  if (metadata.timedOut) {
+    details.push("timed out");
+  } else if (metadata.warnings.length > 0 || metadata.failedRepoCount > 0) {
+    details.push("warnings");
+  }
+
+  if (details.length > 0) {
+    lines.push(`Scan details: ${details.join(" · ")}`);
+  }
+
+  return lines;
 }
 
 function renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle) {
@@ -595,6 +1287,16 @@ function renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji,
   return renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji);
 }
 
+function renderScanNotesLines(notes) {
+  const lines = ["### Scan Notes", ""];
+
+  for (const note of notes) {
+    lines.push(`- ${formatScalar(note)}`);
+  }
+
+  return lines;
+}
+
 function renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji) {
   const lines = [`### ${tidySectionTitle}`, ""];
 
@@ -700,6 +1402,720 @@ async function ensureFolder(vault, folderPath) {
       throw new Error(`Cannot create folder because a file exists at ${currentPath}`);
     }
   }
+}
+
+async function scanConfiguredRepositories(configuredPaths, dateStamp, options = {}) {
+  const repoPaths = normalizeRepoPaths(configuredPaths);
+  const repos = [];
+  const warnings = [];
+  const scanStartedAt = new Date().toISOString();
+  const scanStartedAtMs = Date.now();
+  const maxDurationMs = normalizeMaxScanDurationSeconds(options.maxDurationSeconds) * 1000;
+  const context = {
+    scanStartedAtMs,
+    deadlineMs: scanStartedAtMs + maxDurationMs,
+    currentRepoDeadlineMs: null,
+    timedOut: false,
+    warnings,
+  };
+  let scannedRepoCount = 0;
+  let skippedRepoCount = 0;
+  let failedRepoCount = 0;
+
+  for (let index = 0; index < repoPaths.length; index += 1) {
+    const repoPath = repoPaths[index];
+
+    if (!hasScanBudget(context)) {
+      context.timedOut = true;
+      const remainingCount = repoPaths.length - index;
+      skippedRepoCount += remainingCount;
+      warnings.push(`Scan budget exceeded before ${remainingCount} configured repo${remainingCount === 1 ? "" : "s"} could be scanned.`);
+      break;
+    }
+
+    const remainingRepoCount = repoPaths.length - index;
+    context.currentRepoDeadlineMs = Math.min(context.deadlineMs, Date.now() + getPerRepoBudgetMs(context, remainingRepoCount));
+
+    let result;
+    try {
+      result = await scanLocalGitRepo(repoPath, dateStamp, Object.assign({}, options, { context }));
+    } catch (error) {
+      result = { note: `${formatLocalPath(repoPath)}: ${formatGitError(error)}`, failed: true };
+    } finally {
+      context.currentRepoDeadlineMs = null;
+    }
+
+    if (result.repo) {
+      repos.push(result.repo);
+      scannedRepoCount += 1;
+    }
+
+    if (result.note) {
+      warnings.push(result.note);
+    }
+
+    if (result.skipped) {
+      skippedRepoCount += 1;
+    }
+
+    if (result.failed) {
+      failedRepoCount += 1;
+    }
+
+    if (context.timedOut) {
+      const remainingCount = repoPaths.length - index - 1;
+      skippedRepoCount += remainingCount;
+
+      if (remainingCount > 0) {
+        warnings.push(`Scan budget exceeded before ${remainingCount} configured repo${remainingCount === 1 ? "" : "s"} could be scanned.`);
+      }
+
+      break;
+    }
+  }
+
+  repos.sort((left, right) => formatScalar(left.name).localeCompare(formatScalar(right.name), undefined, { sensitivity: "base" }));
+  const scanCompletedAt = new Date().toISOString();
+  const durationMs = Date.now() - scanStartedAtMs;
+
+  return {
+    schemaVersion: GIT_SHEET_SCHEMA_VERSION,
+    date: dateStamp,
+    generatedAt: scanCompletedAt,
+    source: GIT_SHEET_SOURCE,
+    machine: getLocalMachineName(),
+    summary: summarizeRepos(repos, repoPaths.length),
+    scanStartedAt,
+    scanCompletedAt,
+    durationMs,
+    repoCount: repoPaths.length,
+    scannedRepoCount,
+    skippedRepoCount,
+    failedRepoCount,
+    timedOut: context.timedOut,
+    scanTrigger: normalizeScanTrigger(options.trigger),
+    warnings,
+    repos,
+    notes: warnings,
+  };
+}
+
+async function scanLocalGitRepo(configuredPath, dateStamp, options) {
+  const repoPath = normalizeLocalPath(configuredPath);
+
+  if (!repoPath) {
+    return { note: "Skipped an empty repository path.", skipped: true };
+  }
+
+  const validationError = validateLocalDirectory(repoPath);
+  if (validationError) {
+    return { note: `${formatLocalPath(repoPath)}: ${validationError}`, skipped: true };
+  }
+
+  const repoValidation = validateTrackedGitRepo(repoPath);
+  if (!repoValidation.valid) {
+    return { note: repoValidation.message, skipped: true };
+  }
+
+  let insideWorkTree;
+  try {
+    insideWorkTree = await runGit(repoPath, ["rev-parse", "--is-inside-work-tree"], options);
+  } catch (error) {
+    markScanTimeoutFromError(options, error, repoPath);
+    return { note: formatGitFailure(repoPath, error), failed: true };
+  }
+
+  if (insideWorkTree.trim() !== "true") {
+    return { note: `${formatLocalPath(repoPath)} is not inside a Git work tree.`, failed: true };
+  }
+
+  const rootOutput = await tryGit(repoPath, ["rev-parse", "--show-toplevel"], options);
+  const repoRoot = normalizeLocalPath(rootOutput || repoPath);
+  const hasCommits = Boolean(await tryGit(repoRoot, ["rev-parse", "--verify", "HEAD"], options));
+  const branch = await readGitBranch(repoRoot, hasCommits, options);
+  const dirty = await readGitDirtyState(repoRoot, options);
+  const commitsToday = hasCommits ? await readGitCommitsForDate(repoRoot, dateStamp, options) : [];
+  const latestCommit = hasCommits ? await readLatestGitCommit(repoRoot, options) : null;
+  const upstream = hasCommits ? await tryGit(repoRoot, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], options) : "";
+  const unpushedCommits = upstream ? await readGitCount(repoRoot, ["rev-list", "--count", "@{upstream}..HEAD"], options) : 0;
+  const behindUpstream = upstream ? await readGitCount(repoRoot, ["rev-list", "--count", "HEAD..@{upstream}"], options) : 0;
+
+  return {
+    repo: {
+      name: inferRepoName(repoRoot),
+      path: formatLocalPath(repoRoot),
+      branch,
+      hasCommits,
+      touchedToday: commitsToday.length > 0,
+      commitsToday: commitsToday.length,
+      dirty,
+      unpushedCommits,
+      behindUpstream,
+      latestCommit,
+      notes: [],
+    },
+  };
+}
+
+async function readGitBranch(repoPath, hasCommits, options) {
+  if (!hasCommits) {
+    return "";
+  }
+
+  const branch = await tryGit(repoPath, ["branch", "--show-current"], options);
+  if (branch) {
+    return branch.trim();
+  }
+
+  const shortHead = await tryGit(repoPath, ["rev-parse", "--short", "HEAD"], options);
+  return shortHead ? `detached:${shortenHash(shortHead)}` : "";
+}
+
+async function readGitDirtyState(repoPath, options) {
+  const status = await tryGit(repoPath, ["status", "--porcelain"], options);
+  return Boolean(status && status.trim().length > 0);
+}
+
+async function readGitCommitsForDate(repoPath, dateStamp, options) {
+  const output = await tryGit(repoPath, [
+    "log",
+    `--since=${dateStamp}T00:00:00`,
+    `--until=${dateStamp}T23:59:59`,
+    "--format=%H%x1f%h%x1f%s",
+  ], options);
+
+  return parseGitCommitLines(output);
+}
+
+async function readLatestGitCommit(repoPath, options) {
+  const output = await tryGit(repoPath, ["log", "-1", "--format=%H%x1f%h%x1f%s"], options);
+  const commits = parseGitCommitLines(output);
+  return commits.length > 0 ? commits[0] : null;
+}
+
+async function readGitCount(repoPath, args, options) {
+  const output = await tryGit(repoPath, args, options);
+  const count = Number.parseInt(String(output || "").trim(), 10);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function parseGitCommitLines(output) {
+  return String(output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [hash, shortHash, ...messageParts] = line.split("\x1f");
+      return {
+        hash: hash || "",
+        shortHash: shortHash || "",
+        message: messageParts.join(" ").trim(),
+      };
+    });
+}
+
+function summarizeRepos(repos, scannedCount) {
+  return {
+    reposScanned: scannedCount,
+    reposIncluded: repos.length,
+    reposTouchedToday: repos.filter((repo) => repo.touchedToday).length,
+    commitsToday: repos.reduce((total, repo) => total + toNumber(repo.commitsToday), 0),
+    dirtyRepos: repos.filter((repo) => repo.dirty).length,
+    unpushedCommits: repos.reduce((total, repo) => total + toNumber(repo.unpushedCommits), 0),
+    behindCommits: repos.reduce((total, repo) => total + toNumber(repo.behindUpstream), 0),
+  };
+}
+
+function runGit(repoPath, args, options = {}) {
+  const timeoutMs = getGitCommandTimeoutMs(options);
+
+  if (timeoutMs <= 0) {
+    const error = new Error("Scan budget exceeded before Git command could start.");
+    error.code = getGlobalRemainingScanBudgetMs(options.context) <= 250 ? "LJ_OS_SCAN_BUDGET_EXCEEDED" : "LJ_OS_REPO_BUDGET_EXCEEDED";
+    error.isGitTimeout = true;
+    error.gitArgs = args;
+    throw error;
+  }
+
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      ["-C", repoPath, ...args],
+      {
+        windowsHide: true,
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          error.stdout = stdout;
+          error.stderr = stderr;
+          error.gitArgs = args;
+          if (error.killed || error.code === "ETIMEDOUT") {
+            error.code = error.code || "ETIMEDOUT";
+            error.isGitTimeout = true;
+          }
+          reject(error);
+          return;
+        }
+
+        resolve(String(stdout || "").trim());
+      }
+    );
+  });
+}
+
+async function tryGit(repoPath, args, options = {}) {
+  try {
+    return await runGit(repoPath, args, options);
+  } catch (error) {
+    markScanTimeoutFromError(options, error, repoPath);
+    return "";
+  }
+}
+
+function hasScanBudget(context, minimumMs = 250) {
+  return getGlobalRemainingScanBudgetMs(context) > minimumMs;
+}
+
+function getRemainingScanBudgetMs(context) {
+  if (!context || !Number.isFinite(context.deadlineMs)) {
+    return DEFAULT_MAX_SCAN_DURATION_SECONDS * 1000;
+  }
+
+  const deadlineMs = Number.isFinite(context.currentRepoDeadlineMs)
+    ? Math.min(context.deadlineMs, context.currentRepoDeadlineMs)
+    : context.deadlineMs;
+
+  return Math.max(0, deadlineMs - Date.now());
+}
+
+function getGlobalRemainingScanBudgetMs(context) {
+  if (!context || !Number.isFinite(context.deadlineMs)) {
+    return DEFAULT_MAX_SCAN_DURATION_SECONDS * 1000;
+  }
+
+  return Math.max(0, context.deadlineMs - Date.now());
+}
+
+function getPerRepoBudgetMs(context, remainingRepoCount) {
+  const remainingMs = getGlobalRemainingScanBudgetMs(context);
+
+  if (remainingRepoCount <= 1) {
+    return remainingMs;
+  }
+
+  return Math.max(1000, Math.min(10000, Math.floor(remainingMs / remainingRepoCount)));
+}
+
+function getGitCommandTimeoutMs(options = {}) {
+  const remainingMs = getRemainingScanBudgetMs(options.context);
+  const maxCommandMs = normalizeMaxScanDurationSeconds(options.maxDurationSeconds) * 1000;
+  return Math.max(0, Math.min(remainingMs, maxCommandMs));
+}
+
+function markScanTimeoutFromError(options = {}, error, repoPath) {
+  if (!isScanTimeoutError(error) || !options.context) {
+    return;
+  }
+
+  const repoLabel = repoPath ? ` while scanning ${formatLocalPath(repoPath)}` : "";
+  const globalBudgetExceeded = getGlobalRemainingScanBudgetMs(options.context) <= 250 || error.code === "LJ_OS_SCAN_BUDGET_EXCEEDED";
+  const warning = globalBudgetExceeded
+    ? `Scan budget exceeded${repoLabel}.`
+    : `Repo scan budget exceeded${repoLabel}; continuing with remaining repos.`;
+
+  if (globalBudgetExceeded) {
+    options.context.timedOut = true;
+  }
+
+  if (!options.context.warnings.includes(warning)) {
+    options.context.warnings.push(warning);
+  }
+}
+
+function isScanTimeoutError(error) {
+  if (!error) {
+    return false;
+  }
+
+  return error.isGitTimeout === true || error.code === "ETIMEDOUT" || error.code === "LJ_OS_SCAN_BUDGET_EXCEEDED" || error.code === "LJ_OS_REPO_BUDGET_EXCEEDED";
+}
+
+function normalizeScanTrigger(value) {
+  return ["startup", "interval", "view-open", "manual"].includes(value) ? value : "manual";
+}
+
+function normalizeAutoScanIntervalMinutes(value) {
+  const minutes = Math.floor(toNumber(value));
+  if (minutes <= 0) {
+    return DEFAULT_SETTINGS.autoScanIntervalMinutes;
+  }
+
+  return Math.max(minutes, MIN_AUTO_SCAN_INTERVAL_MINUTES);
+}
+
+function normalizeMaxScanDurationSeconds(value) {
+  const seconds = Math.floor(toNumber(value));
+  if (seconds <= 0) {
+    return DEFAULT_MAX_SCAN_DURATION_SECONDS;
+  }
+
+  return Math.max(seconds, MIN_MAX_SCAN_DURATION_SECONDS);
+}
+
+function normalizeScanState(value) {
+  const state = value && typeof value === "object" ? value : {};
+
+  return {
+    isScanRunning: state.isScanRunning === true,
+    lastScanStartedAt: formatScalar(state.lastScanStartedAt),
+    lastScanCompletedAt: formatScalar(state.lastScanCompletedAt),
+    lastSuccessfulScanCompletedAt: formatScalar(state.lastSuccessfulScanCompletedAt),
+    lastScanDurationMs: toNumber(state.lastScanDurationMs),
+    lastScanTrigger: formatScalar(state.lastScanTrigger),
+    lastRepoCount: toNumber(state.lastRepoCount),
+    lastScannedRepoCount: toNumber(state.lastScannedRepoCount),
+    lastSkippedRepoCount: toNumber(state.lastSkippedRepoCount),
+    lastFailedRepoCount: toNumber(state.lastFailedRepoCount),
+    lastScanTimedOut: state.lastScanTimedOut === true,
+    lastScanStatus: formatScalar(state.lastScanStatus || "not scanned yet"),
+  };
+}
+
+function getGitSheetMetadata(gitSheet) {
+  const sheet = gitSheet && typeof gitSheet === "object" ? gitSheet : {};
+
+  return {
+    scanCompletedAt: formatScalar(sheet.scanCompletedAt || sheet.generatedAt),
+    durationMs: toNumber(sheet.durationMs),
+    repoCount: toNumber(sheet.repoCount),
+    scannedRepoCount: toNumber(sheet.scannedRepoCount),
+    skippedRepoCount: toNumber(sheet.skippedRepoCount),
+    failedRepoCount: toNumber(sheet.failedRepoCount),
+    timedOut: sheet.timedOut === true,
+    scanTrigger: formatScalar(sheet.scanTrigger),
+    warnings: Array.isArray(sheet.warnings) ? sheet.warnings : [],
+  };
+}
+
+function formatCompletedScanStatus(metadata) {
+  if (metadata.timedOut) {
+    return "completed with timeout";
+  }
+
+  if (metadata.failedRepoCount > 0 || metadata.warnings.length > 0) {
+    return "completed with warnings";
+  }
+
+  return "completed";
+}
+
+function formatManualScanNotice(gitSheet, outputPath) {
+  const metadata = getGitSheetMetadata(gitSheet);
+  const duration = formatDurationMs(metadata.durationMs);
+
+  return [
+    `Scanned ${metadata.scannedRepoCount} repos`,
+    `skipped ${metadata.skippedRepoCount}`,
+    `failed ${metadata.failedRepoCount}`,
+    duration,
+    outputPath,
+  ].join(" · ");
+}
+
+function formatScanStateDuration(scanState) {
+  const durationMs = toNumber(scanState && scanState.lastScanDurationMs);
+  return durationMs > 0 ? formatDurationMs(durationMs) : "Not available";
+}
+
+function formatDurationMs(value) {
+  const durationMs = toNumber(value);
+
+  if (durationMs <= 0) {
+    return "0s";
+  }
+
+  if (durationMs < 1000) {
+    return `${durationMs}ms`;
+  }
+
+  return `${(durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0)}s`;
+}
+
+function formatTimestampForSettings(value) {
+  const text = formatScalar(value);
+  if (!text) {
+    return "Not available";
+  }
+
+  return formatGeneratedAt(text);
+}
+
+function migrateConfiguredPaths(savedSettings) {
+  const hasSplitSettings = hasOwn(savedSettings, "scanRoots") || hasOwn(savedSettings, "trackedRepoPaths");
+
+  if (hasSplitSettings) {
+    return {
+      scanRoots: normalizeRepoPaths(savedSettings.scanRoots),
+      trackedRepoPaths: normalizeRepoPaths(savedSettings.trackedRepoPaths),
+    };
+  }
+
+  const scanRoots = [];
+  const trackedRepoPaths = [];
+
+  for (const configuredPath of normalizeRepoPaths(savedSettings.repoPaths)) {
+    if (hasGitMetadata(configuredPath)) {
+      trackedRepoPaths.push(configuredPath);
+    } else {
+      scanRoots.push(configuredPath);
+    }
+  }
+
+  return {
+    scanRoots: normalizeRepoPaths(scanRoots),
+    trackedRepoPaths: normalizeRepoPaths(trackedRepoPaths),
+  };
+}
+
+function discoverGitRepositories(scanRoots, options = {}) {
+  const roots = normalizeRepoPaths(scanRoots);
+  const repositories = [];
+  const warnings = [];
+  const maxDepth = Math.max(0, Math.floor(toNumber(options.maxDepth) || DEFAULT_DISCOVERY_DEPTH));
+  const deadlineMs = Date.now() + normalizeMaxScanDurationSeconds(options.maxDurationSeconds) * 1000;
+  let visitedDirectoryCount = 0;
+
+  for (const root of roots) {
+    if (Date.now() >= deadlineMs) {
+      warnings.push("Repository discovery stopped because the scan budget was exceeded.");
+      break;
+    }
+
+    const validationError = validateLocalDirectory(root);
+    if (validationError) {
+      warnings.push(`${formatLocalPath(root)}: ${validationError}`);
+      continue;
+    }
+
+    if (hasGitMetadata(root)) {
+      repositories.push(root);
+      continue;
+    }
+
+    const stack = [{ folderPath: root, depth: 0 }];
+
+    while (stack.length > 0) {
+      if (Date.now() >= deadlineMs) {
+        warnings.push("Repository discovery stopped because the scan budget was exceeded.");
+        stack.length = 0;
+        break;
+      }
+
+      if (visitedDirectoryCount >= DEFAULT_DISCOVERY_MAX_DIRECTORIES) {
+        warnings.push(`Repository discovery stopped after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders.`);
+        stack.length = 0;
+        break;
+      }
+
+      const current = stack.pop();
+      visitedDirectoryCount += 1;
+
+      if (hasGitMetadata(current.folderPath)) {
+        repositories.push(current.folderPath);
+        continue;
+      }
+
+      if (current.depth >= maxDepth) {
+        continue;
+      }
+
+      let entries;
+      try {
+        entries = fs.readdirSync(current.folderPath, { withFileTypes: true });
+      } catch (error) {
+        warnings.push(`${formatLocalPath(current.folderPath)} could not be searched.`);
+        continue;
+      }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || shouldSkipDiscoveryFolder(entry.name)) {
+          continue;
+        }
+
+        stack.push({
+          folderPath: path.join(current.folderPath, entry.name),
+          depth: current.depth + 1,
+        });
+      }
+    }
+  }
+
+  return {
+    repositories: normalizeRepoPaths(repositories),
+    warnings,
+  };
+}
+
+function validateTrackedGitRepo(repoPath) {
+  if (hasGitMetadata(repoPath)) {
+    return { valid: true };
+  }
+
+  return {
+    valid: false,
+    message: formatNotGitRepositoryMessage(repoPath),
+  };
+}
+
+function hasGitMetadata(repoPath) {
+  try {
+    const stats = fs.statSync(path.join(repoPath, ".git"));
+    return stats.isDirectory() || stats.isFile();
+  } catch (error) {
+    return false;
+  }
+}
+
+function shouldSkipDiscoveryFolder(name) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+
+  if (!normalizedName) {
+    return true;
+  }
+
+  if (normalizedName.startsWith(".") && normalizedName !== ".git") {
+    return true;
+  }
+
+  return DISCOVERY_SKIP_FOLDER_NAMES.has(normalizedName);
+}
+
+function mergeUniquePaths(existingPaths, newPaths) {
+  return normalizeRepoPaths([...normalizeRepoPaths(existingPaths), ...normalizeRepoPaths(newPaths)]);
+}
+
+function formatNotGitRepositoryMessage(repoPath) {
+  const formattedPath = formatLocalPath(repoPath);
+
+  if (isDriveRoot(repoPath)) {
+    return `${formattedPath} is a scan root, not a Git repo. Run Discover repositories to find repos inside it.`;
+  }
+
+  return `${formattedPath} is not a Git repository. Use Discover repositories if this is a parent folder.`;
+}
+
+function isDriveRoot(repoPath) {
+  const normalizedPath = normalizeLocalPath(repoPath);
+  const rootPath = normalizeLocalPath(path.parse(normalizedPath).root);
+  return normalizedPath === rootPath;
+}
+
+function normalizeRepoPaths(value) {
+  const rawPaths = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  const seen = new Set();
+  const repoPaths = [];
+
+  for (const rawPath of rawPaths) {
+    const repoPath = normalizeLocalPath(rawPath);
+    if (!repoPath) {
+      continue;
+    }
+
+    const key = process.platform === "win32" ? repoPath.toLowerCase() : repoPath;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    repoPaths.push(repoPath);
+  }
+
+  return repoPaths;
+}
+
+function normalizeLocalPath(value) {
+  let text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  text = text.replace(/^["']|["']$/g, "").trim();
+  text = expandHomePath(text);
+
+  try {
+    return path.resolve(text);
+  } catch (error) {
+    return text;
+  }
+}
+
+function expandHomePath(value) {
+  if (value === "~") {
+    return os.homedir();
+  }
+
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+
+  return value;
+}
+
+function validateLocalDirectory(repoPath) {
+  try {
+    const stats = fs.statSync(repoPath);
+    return stats.isDirectory() ? "" : "Path is not a folder.";
+  } catch (error) {
+    return "Path does not exist or cannot be read.";
+  }
+}
+
+function formatRepoPathsForSettings(value) {
+  return normalizeRepoPaths(value).join("\n");
+}
+
+function formatGitFailure(repoPath, error) {
+  return `Could not scan ${formatLocalPath(repoPath)}: ${formatGitError(error)}`;
+}
+
+function formatGitError(error) {
+  if (error && error.code === "ENOENT") {
+    return "Git is not available to Obsidian. Install Git or make sure Git is in PATH.";
+  }
+
+  const stderr = String((error && error.stderr) || "").trim();
+  if (stderr) {
+    if (/not a git repository/i.test(stderr)) {
+      return "This path is not a Git repository. Use Discover repositories if it is a parent folder.";
+    }
+
+    return stderr.split(/\r?\n/)[0].trim();
+  }
+
+  const message = String((error && error.message) || "").trim();
+  if (/not a git repository/i.test(message)) {
+    return "This path is not a Git repository. Use Discover repositories if it is a parent folder.";
+  }
+
+  return message || "Git command failed.";
+}
+
+function getLocalMachineName() {
+  try {
+    return os.hostname();
+  } catch (error) {
+    return "local-machine";
+  }
+}
+
+function inferRepoName(repoPath) {
+  return path.basename(repoPath) || formatLocalPath(repoPath);
+}
+
+function formatLocalPath(value) {
+  return String(value || "").replace(/\\/g, "/");
 }
 
 function joinVaultPath(...parts) {

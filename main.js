@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
   showTidyQueue: true,
   tidyView: "queue",
   tableFormat: "standard",
+  showAdvancedSettings: false,
 };
 
 module.exports = class LjOsPlugin extends Plugin {
@@ -129,8 +130,9 @@ class LjOsSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "LJ OS" });
-    containerEl.createEl("h3", { text: "Paths" });
+
+    new Setting(containerEl).setName("LJ OS").setHeading();
+    new Setting(containerEl).setName("Paths").setHeading();
 
     new Setting(containerEl)
       .setName("Git Wall data folder")
@@ -158,13 +160,141 @@ class LjOsSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "Labels & Headings" });
+    new Setting(containerEl).setName("Display").setHeading();
+
+    new Setting(containerEl)
+      .setName("Use emoji")
+      .setDesc("Emoji mode affects rendered output only. It does not rewrite saved title fields.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.useEmoji !== false).onChange(async (value) => {
+          this.plugin.settings.useEmoji = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show summary section")
+      .setDesc("Render the summary section.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showSummary !== false).onChange(async (value) => {
+          this.plugin.settings.showSummary = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    if (this.plugin.settings.showSummary !== false) {
+      new Setting(containerEl)
+        .setName("Summary style")
+        .setDesc("Choose how the summary is rendered.")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("callout", "Callout")
+            .addOption("scoreboard", "Scoreboard")
+            .addOption("pit-wall", "Pit Wall")
+            .setValue(normalizeSummaryStyle(this.plugin.settings.summaryStyle))
+            .onChange(async (value) => {
+              this.plugin.settings.summaryStyle = normalizeSummaryStyle(value);
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
+    new Setting(containerEl)
+      .setName("Show repository section")
+      .setDesc("Render the repository section.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showRepoTable !== false).onChange(async (value) => {
+          this.plugin.settings.showRepoTable = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    if (this.plugin.settings.showRepoTable !== false) {
+      const repoView = normalizeRepoView(this.plugin.settings.repoView);
+
+      new Setting(containerEl)
+        .setName("Repo view")
+        .setDesc("Choose how repositories are rendered.")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("table", "Table")
+            .addOption("status-cards", "Status Cards")
+            .setValue(repoView)
+            .onChange(async (value) => {
+              this.plugin.settings.repoView = normalizeRepoView(value);
+              await this.plugin.saveSettings();
+              this.display();
+            })
+        );
+
+      if (repoView === "table") {
+        new Setting(containerEl)
+          .setName("Table format")
+          .setDesc("Choose how many columns the repository table includes.")
+          .addDropdown((dropdown) =>
+            dropdown
+              .addOption("compact", "Compact")
+              .addOption("standard", "Standard")
+              .addOption("detailed", "Detailed")
+              .addOption("emoji-board", "Emoji board")
+              .setValue(normalizeTableFormat(this.plugin.settings.tableFormat))
+              .onChange(async (value) => {
+                this.plugin.settings.tableFormat = normalizeTableFormat(value);
+                await this.plugin.saveSettings();
+              })
+          );
+      }
+    }
+
+    new Setting(containerEl)
+      .setName("Show tidy-up section")
+      .setDesc("Render the tidy-up section.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showTidyQueue !== false).onChange(async (value) => {
+          this.plugin.settings.showTidyQueue = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    if (this.plugin.settings.showTidyQueue !== false) {
+      new Setting(containerEl)
+        .setName("Tidy view")
+        .setDesc("Choose how tidy-up work is rendered.")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("queue", "Queue")
+            .addOption("shutdown-checklist", "Shutdown Checklist")
+            .setValue(normalizeTidyView(this.plugin.settings.tidyView))
+            .onChange(async (value) => {
+              this.plugin.settings.tidyView = normalizeTidyView(value);
+              await this.plugin.saveSettings();
+            })
+        );
+    }
+
+    new Setting(containerEl).setName("Customize Labels").setHeading();
+
+    new Setting(containerEl)
+      .setName("Show customized label settings")
+      .setDesc("Show title and section-name fields.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showAdvancedSettings === true).onChange(async (value) => {
+          this.plugin.settings.showAdvancedSettings = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    if (!this.plugin.settings.showAdvancedSettings) {
+      return;
+    }
 
     new Setting(containerEl)
       .setName("Daily section heading")
-      .setDesc(
-        "Exact Markdown heading used to find and replace the existing section."
-      )
+      .setDesc("Exact Markdown heading used to find and replace the existing section.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.dailySectionHeading)
@@ -174,10 +304,6 @@ class LjOsSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
-
-    containerEl.createEl("p", {
-      text: "This heading is used to find and replace the existing section.",
-    });
 
     new Setting(containerEl)
       .setName("Summary title")
@@ -194,7 +320,7 @@ class LjOsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Repository section title")
-      .setDesc("Title shown above the repository table.")
+      .setDesc("Title shown above the repository section.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.repoSectionTitle)
@@ -207,7 +333,7 @@ class LjOsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Tidy-up section title")
-      .setDesc("Title shown above the dirty repo queue.")
+      .setDesc("Title shown above the tidy-up section when using queue view.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.tidySectionTitle)
@@ -218,108 +344,18 @@ class LjOsSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("p", {
-      text: "Emoji mode affects rendered output only. It does not rewrite saved title fields.",
-    });
-    containerEl.createEl("h3", { text: "Display" });
-
     new Setting(containerEl)
-      .setName("Use emoji")
-      .setDesc("Render built-in labels with emoji. This does not change saved title strings.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.useEmoji !== false).onChange(async (value) => {
-          this.plugin.settings.useEmoji = value;
+      .setName("Reset labels")
+      .setDesc("Restore the default Git Wall headings and titles.")
+      .addButton((button) =>
+        button.setButtonText("Reset labels").onClick(async () => {
+          this.plugin.settings.dailySectionHeading = DEFAULT_SETTINGS.dailySectionHeading;
+          this.plugin.settings.summaryTitle = DEFAULT_SETTINGS.summaryTitle;
+          this.plugin.settings.repoSectionTitle = DEFAULT_SETTINGS.repoSectionTitle;
+          this.plugin.settings.tidySectionTitle = DEFAULT_SETTINGS.tidySectionTitle;
           await this.plugin.saveSettings();
+          this.display();
         })
-      );
-
-    new Setting(containerEl)
-      .setName("Show summary section")
-      .setDesc("Render the summary section.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showSummary !== false).onChange(async (value) => {
-          this.plugin.settings.showSummary = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Summary style")
-      .setDesc("Choose how the summary is rendered.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("callout", "Callout")
-          .addOption("scoreboard", "Scoreboard")
-          .addOption("pit-wall", "Pit Wall")
-          .setValue(normalizeSummaryStyle(this.plugin.settings.summaryStyle))
-          .onChange(async (value) => {
-            this.plugin.settings.summaryStyle = normalizeSummaryStyle(value);
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Show repository section")
-      .setDesc("Render the repository section.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showRepoTable !== false).onChange(async (value) => {
-          this.plugin.settings.showRepoTable = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Repo view")
-      .setDesc("Choose how repositories are rendered.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("table", "Table")
-          .addOption("status-cards", "Status Cards")
-          .setValue(normalizeRepoView(this.plugin.settings.repoView))
-          .onChange(async (value) => {
-            this.plugin.settings.repoView = normalizeRepoView(value);
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Table format")
-      .setDesc("Choose how many columns the repository table includes. Table format applies only when Repo view is Table.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("compact", "Compact")
-          .addOption("standard", "Standard")
-          .addOption("detailed", "Detailed")
-          .addOption("emoji-board", "Emoji board")
-          .setValue(normalizeTableFormat(this.plugin.settings.tableFormat))
-          .onChange(async (value) => {
-            this.plugin.settings.tableFormat = normalizeTableFormat(value);
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Show tidy-up section")
-      .setDesc("Render the tidy-up section.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showTidyQueue !== false).onChange(async (value) => {
-          this.plugin.settings.showTidyQueue = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Tidy view")
-      .setDesc("Choose how tidy-up work is rendered.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("queue", "Queue")
-          .addOption("shutdown-checklist", "Shutdown Checklist")
-          .setValue(normalizeTidyView(this.plugin.settings.tidyView))
-          .onChange(async (value) => {
-            this.plugin.settings.tidyView = normalizeTidyView(value);
-            await this.plugin.saveSettings();
-          })
       );
   }
 }

@@ -1,9 +1,9 @@
 {
   "id": "lj-os",
   "name": "LJ OS",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.0.0",
-  "description": "Standalone local Git activity snapshots for Obsidian Daily Notes.",
+  "description": "Standalone local Git activity snapshots for Daily Notes.",
   "author": "LJ OS",
   "isDesktopOnly": true
 }

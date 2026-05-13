@@ -1,6 +1,6 @@
 {
   "name": "obsidian-lj-os-plugin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Standalone local Git activity snapshots for Obsidian Daily Notes.",
   "main": "main.js",
   "private": true

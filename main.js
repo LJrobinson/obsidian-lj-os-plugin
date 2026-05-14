@@ -78,6 +78,7 @@ const DEFAULT_SETTINGS = {
   activityWeatherLatitude: "",
   activityWeatherLongitude: "",
   showActivityMoonIcon: false,
+  showThreeDayActivity: false,
   showSevenDayActivity: false,
   sectionOrder: DEFAULT_SECTION_ORDER,
   showAdvancedSettings: false,
@@ -276,9 +277,10 @@ module.exports = class LjOsPlugin extends Plugin {
 
   async insertTodaysGitSheet() {
     const gitSheet = await this.readTodaysGitSheet();
+    const recentActivityDayCount = getRecentActivityDayCount(this.settings);
     const recentGitSheets =
-      gitSheet && this.settings.showDailyActivityBar !== false && this.settings.showSevenDayActivity === true
-        ? await this.readRecentGitSheets(7)
+      gitSheet && recentActivityDayCount > 0
+        ? await this.readRecentGitSheets(recentActivityDayCount)
         : [];
 
     const dailyNotePath = this.getTodaysDailyNotePath();
@@ -793,12 +795,30 @@ class LjOsSettingTab extends PluginSettingTab {
         );
 
       new Setting(containerEl)
+        .setName("Show 3-day activity view")
+        .setDesc("Show compact activity bars for the last 3 cached days.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showThreeDayActivity === true).onChange(async (value) => {
+            this.plugin.settings.showThreeDayActivity = value;
+            if (value) {
+              this.plugin.settings.showSevenDayActivity = false;
+            }
+            await this.plugin.saveSettings();
+            this.display();
+          })
+        );
+
+      new Setting(containerEl)
         .setName("Show 7-day activity view")
         .setDesc("Show compact activity bars for the last 7 cached days.")
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange(async (value) => {
             this.plugin.settings.showSevenDayActivity = value;
+            if (value) {
+              this.plugin.settings.showThreeDayActivity = false;
+            }
             await this.plugin.saveSettings();
+            this.display();
           })
         );
     }
@@ -1317,6 +1337,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const showDailyActivityBar = renderSettings.showDailyActivityBar !== false;
   const showActivityWeatherIcon = renderSettings.showActivityWeatherIcon === true;
   const showActivityMoonIcon = renderSettings.showActivityMoonIcon === true;
+  const showThreeDayActivity = renderSettings.showThreeDayActivity === true;
   const showSevenDayActivity = renderSettings.showSevenDayActivity === true;
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
@@ -1336,6 +1357,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
         showWeatherIcon: showActivityWeatherIcon,
         weatherIcon: renderSettings.activityWeatherIcon,
         showMoonIcon: showActivityMoonIcon,
+        showThreeDayActivity,
         showSevenDayActivity,
       }));
     } else if (sectionId === "gitScoreboard" && showSummary) {
@@ -1398,8 +1420,18 @@ function renderActivitySectionLines(gitSheet, options = {}) {
     showMoonIcon,
   })];
 
+  if (options.showThreeDayActivity === true) {
+    lines.push("", "3-Day", "", ...renderRecentActivityTableLines(gitSheet, {
+      dayCount: 3,
+      recentGitSheets: options.recentGitSheets,
+      showWeatherIcon,
+      showMoonIcon,
+    }));
+  }
+
   if (options.showSevenDayActivity === true) {
-    lines.push("", "7-Day", "", ...renderSevenDayActivityTableLines(gitSheet, {
+    lines.push("", "7-Day", "", ...renderRecentActivityTableLines(gitSheet, {
+      dayCount: 7,
       recentGitSheets: options.recentGitSheets,
       showWeatherIcon,
       showMoonIcon,
@@ -1409,9 +1441,10 @@ function renderActivitySectionLines(gitSheet, options = {}) {
   return lines;
 }
 
-function renderSevenDayActivityTableLines(gitSheet, options = {}) {
+function renderRecentActivityTableLines(gitSheet, options = {}) {
   const showWeatherIcon = options.showWeatherIcon === true;
   const showMoonIcon = options.showMoonIcon === true;
+  const dayCount = normalizeRecentActivityDayCount(options.dayCount);
   const headers = ["Day"];
   const divider = [":---:"];
 
@@ -1430,7 +1463,7 @@ function renderSevenDayActivityTableLines(gitSheet, options = {}) {
 
   const lines = [toMarkdownTableRow(headers), toMarkdownTableRow(divider)];
 
-  for (const entry of getSevenDayActivityEntries(gitSheet, options.recentGitSheets)) {
+  for (const entry of getRecentActivityEntries(gitSheet, options.recentGitSheets, dayCount)) {
     const row = [formatScalar(entry.label) || "Day"];
 
     if (showWeatherIcon) {
@@ -1695,19 +1728,43 @@ function getDailyActivityBucketIndex(timestamp) {
   return -1;
 }
 
-function getSevenDayActivityEntries(todayGitSheet, recentGitSheets) {
+function getRecentActivityEntries(todayGitSheet, recentGitSheets, dayCount = 7) {
+  const count = normalizeRecentActivityDayCount(dayCount);
+
   if (Array.isArray(recentGitSheets) && recentGitSheets.length > 0) {
-    return recentGitSheets.slice(-7);
+    return recentGitSheets.slice(-count);
   }
 
   const todayDate = getGitSheetActivityDate(todayGitSheet);
   const todayStamp = formatScalar(todayGitSheet && todayGitSheet.date) || formatLocalDateStamp(todayDate);
 
-  return getRecentLocalDateInfos(7, todayDate).map((dateInfo) =>
+  return getRecentLocalDateInfos(count, todayDate).map((dateInfo) =>
     Object.assign({}, dateInfo, {
       gitSheet: dateInfo.dateStamp === todayStamp ? todayGitSheet : null,
     })
   );
+}
+
+function normalizeRecentActivityDayCount(value) {
+  return Math.max(1, Math.floor(toNumber(value)) || 7);
+}
+
+function getRecentActivityDayCount(settings = {}) {
+  if (settings.showDailyActivityBar === false) {
+    return 0;
+  }
+
+  let dayCount = 0;
+
+  if (settings.showThreeDayActivity === true) {
+    dayCount = Math.max(dayCount, 3);
+  }
+
+  if (settings.showSevenDayActivity === true) {
+    dayCount = Math.max(dayCount, 7);
+  }
+
+  return dayCount;
 }
 
 function getGitSheetActivityDate(gitSheet) {

@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS = {
   showTidyQueue: true,
   tidyView: "queue",
   tableFormat: "standard",
+  showDailyActivityBar: true,
   sectionOrder: DEFAULT_SECTION_ORDER,
   showAdvancedSettings: false,
   showAdvancedScanningSettings: false,
@@ -647,6 +648,16 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Show daily activity bar")
+      .setDesc("Show a compact timeline of when activity happened today.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showDailyActivityBar !== false).onChange(async (value) => {
+          this.plugin.settings.showDailyActivityBar = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Show summary section")
       .setDesc("Render the summary section.")
       .addToggle((toggle) =>
@@ -1157,6 +1168,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const repoView = normalizeRepoView(renderSettings.repoView);
   const tidyView = normalizeTidyView(renderSettings.tidyView);
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
+  const showDailyActivityBar = renderSettings.showDailyActivityBar !== false;
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
   const showTidyQueue = renderSettings.showTidyQueue !== false;
@@ -1168,7 +1180,9 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
   lines.push(...formatScanMetadataLines(gitSheet));
 
-  blocks.push(renderActivitySectionLines(gitSheet));
+  if (showDailyActivityBar) {
+    blocks.push(renderActivitySectionLines(gitSheet));
+  }
 
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
     if (sectionId === "gitScoreboard" && showSummary) {

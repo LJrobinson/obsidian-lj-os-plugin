@@ -1769,6 +1769,7 @@ async function scanLocalGitRepo(configuredPath, dateStamp, options) {
       hasCommits,
       touchedToday: commitsToday.length > 0,
       commitsToday: commitsToday.length,
+      activityTimestamps: commitsToday.map((commit) => commit.timestamp).filter(Boolean),
       dirty,
       unpushedCommits,
       behindUpstream,
@@ -1802,7 +1803,7 @@ async function readGitCommitsForDate(repoPath, dateStamp, options) {
     "log",
     `--since=${dateStamp}T00:00:00`,
     `--until=${dateStamp}T23:59:59`,
-    "--format=%H%x1f%h%x1f%s",
+    "--format=%H%x1f%h%x1f%cI%x1f%s",
   ], options);
 
   return parseGitCommitLines(output);
@@ -1826,13 +1827,28 @@ function parseGitCommitLines(output) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [hash, shortHash, ...messageParts] = line.split("\x1f");
-      return {
+      const parts = line.split("\x1f");
+      const hash = parts[0] || "";
+      const shortHash = parts[1] || "";
+      const maybeTimestamp = parts[2] || "";
+      const hasTimestamp = parts.length >= 4 && isGitIsoTimestamp(maybeTimestamp);
+      const messageParts = hasTimestamp ? parts.slice(3) : parts.slice(2);
+      const commit = {
         hash: hash || "",
         shortHash: shortHash || "",
         message: messageParts.join(" ").trim(),
       };
+
+      if (hasTimestamp) {
+        commit.timestamp = maybeTimestamp;
+      }
+
+      return commit;
     });
+}
+
+function isGitIsoTimestamp(value) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(formatScalar(value));
 }
 
 function summarizeRepos(repos, scannedCount) {

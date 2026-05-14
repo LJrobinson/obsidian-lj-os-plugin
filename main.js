@@ -1,4 +1,4 @@
-const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath } = require("obsidian");
+const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, requestUrl } = require("obsidian");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -11,6 +11,8 @@ const DEFAULT_MAX_SCAN_DURATION_SECONDS = 30;
 const MIN_MAX_SCAN_DURATION_SECONDS = 5;
 const RECENT_AUTO_SCAN_SKIP_MS = 60 * 1000;
 const VIEW_OPEN_SCAN_DEBOUNCE_MS = 60 * 1000;
+const ACTIVITY_WEATHER_CACHE_MS = 30 * 60 * 1000;
+const ACTIVITY_WEATHER_FETCH_TIMEOUT_MS = 2500;
 const DEFAULT_DISCOVERY_DEPTH = 3;
 const DEFAULT_DISCOVERY_MAX_DIRECTORIES = 2000;
 const DEFAULT_SECTION_ORDER = ["activityBar", "gitScoreboard", "repositoryActivity", "cleanupChecklist"];
@@ -72,6 +74,8 @@ const DEFAULT_SETTINGS = {
   tableFormat: "standard",
   showDailyActivityBar: true,
   showActivityWeatherIcon: false,
+  activityWeatherLatitude: "",
+  activityWeatherLongitude: "",
   showActivityMoonIcon: false,
   showSevenDayActivity: false,
   sectionOrder: DEFAULT_SECTION_ORDER,
@@ -82,6 +86,7 @@ const DEFAULT_SETTINGS = {
 module.exports = class LjOsPlugin extends Plugin {
   async onload() {
     this.autoScanIntervalId = null;
+    this.activityWeatherCache = null;
     this.startupScanTimeoutId = null;
     this.lastViewOpenScanRequestedAt = 0;
     this.suppressViewOpenScanUntil = 0;
@@ -133,6 +138,8 @@ module.exports = class LjOsPlugin extends Plugin {
     this.settings.autoScanEnabled = savedSettings.autoScanEnabled !== false;
     this.settings.scanOnViewOpen = savedSettings.scanOnViewOpen !== false;
     this.settings.showAdvancedScanningSettings = savedSettings.showAdvancedScanningSettings === true;
+    this.settings.activityWeatherLatitude = sanitizeCoordinateSetting(this.settings.activityWeatherLatitude);
+    this.settings.activityWeatherLongitude = sanitizeCoordinateSetting(this.settings.activityWeatherLongitude);
     this.settings.sectionOrder = normalizeSectionOrder(this.settings.sectionOrder);
     this.scanState = normalizeScanState(savedSettings.scanState);
     if (this.scanState.isScanRunning) {
@@ -300,7 +307,8 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     const existingContent = await this.app.vault.read(dailyNoteFile);
-    const renderSettings = Object.assign({}, this.settings, { recentGitSheets });
+    const activityWeatherIcon = gitSheet ? await this.resolveActivityWeatherIcon() : null;
+    const renderSettings = Object.assign({}, this.settings, { recentGitSheets, activityWeatherIcon });
     const sectionMarkdown = gitSheet
       ? renderGitSheetMarkdown(gitSheet, renderSettings)
       : renderMissingGitSheetMarkdown(this.settings);
@@ -342,6 +350,30 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     return entries;
+  }
+
+  async resolveActivityWeatherIcon() {
+    const request = normalizeActivityWeatherRequest(this.settings);
+
+    if (!request) {
+      return null;
+    }
+
+    if (
+      this.activityWeatherCache &&
+      this.activityWeatherCache.key === request.key &&
+      Date.now() - this.activityWeatherCache.fetchedAtMs < ACTIVITY_WEATHER_CACHE_MS
+    ) {
+      return this.activityWeatherCache.icon;
+    }
+
+    const icon = await fetchOpenMeteoActivityWeatherIcon(request);
+    this.activityWeatherCache = {
+      key: request.key,
+      fetchedAtMs: Date.now(),
+      icon,
+    };
+    return icon;
   }
 
   async discoverRepositories(options = {}) {
@@ -692,9 +724,41 @@ class LjOsSettingTab extends PluginSettingTab {
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.showActivityWeatherIcon === true).onChange(async (value) => {
             this.plugin.settings.showActivityWeatherIcon = value;
+            this.plugin.activityWeatherCache = null;
             await this.plugin.saveSettings();
+            this.display();
           })
         );
+
+      if (this.plugin.settings.showActivityWeatherIcon === true) {
+        new Setting(containerEl)
+          .setName("Weather latitude")
+          .setDesc("Optional latitude used only to fetch the Activity Bar weather icon.")
+          .addText((text) =>
+            text
+              .setPlaceholder("37.7749")
+              .setValue(this.plugin.settings.activityWeatherLatitude)
+              .onChange(async (value) => {
+                this.plugin.settings.activityWeatherLatitude = sanitizeCoordinateSetting(value);
+                this.plugin.activityWeatherCache = null;
+                await this.plugin.saveSettings();
+              })
+          );
+
+        new Setting(containerEl)
+          .setName("Weather longitude")
+          .setDesc("Optional longitude used only to fetch the Activity Bar weather icon.")
+          .addText((text) =>
+            text
+              .setPlaceholder("-122.4194")
+              .setValue(this.plugin.settings.activityWeatherLongitude)
+              .onChange(async (value) => {
+                this.plugin.settings.activityWeatherLongitude = sanitizeCoordinateSetting(value);
+                this.plugin.activityWeatherCache = null;
+                await this.plugin.saveSettings();
+              })
+          );
+      }
 
       new Setting(containerEl)
         .setName("Show moon phase icon")
@@ -1248,6 +1312,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
       blocks.push(renderActivitySectionLines(gitSheet, {
         recentGitSheets: renderSettings.recentGitSheets,
         showWeatherIcon: showActivityWeatherIcon,
+        weatherIcon: renderSettings.activityWeatherIcon,
         showMoonIcon: showActivityMoonIcon,
         showSevenDayActivity,
       }));
@@ -1340,6 +1405,134 @@ function getActivityWeatherIcon(options = {}) {
   }
 
   return formatScalar(options.weatherIcon) || null;
+}
+
+function normalizeActivityWeatherRequest(settings = {}) {
+  if (settings.showDailyActivityBar === false || settings.showActivityWeatherIcon !== true) {
+    return null;
+  }
+
+  const latitudeText = sanitizeCoordinateSetting(settings.activityWeatherLatitude);
+  const longitudeText = sanitizeCoordinateSetting(settings.activityWeatherLongitude);
+
+  if (!latitudeText || !longitudeText) {
+    return null;
+  }
+
+  const latitude = toOptionalNumber(latitudeText);
+  const longitude = toOptionalNumber(longitudeText);
+
+  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+    key: `${latitude.toFixed(4)},${longitude.toFixed(4)}`,
+  };
+}
+
+async function fetchOpenMeteoActivityWeatherIcon(request) {
+  if (!request || typeof requestUrl !== "function") {
+    return null;
+  }
+
+  try {
+    const response = await Promise.race([
+      requestUrl({
+        url: buildOpenMeteoActivityWeatherUrl(request),
+        method: "GET",
+      }).catch(() => null),
+      delay(ACTIVITY_WEATHER_FETCH_TIMEOUT_MS).then(() => null),
+    ]);
+
+    if (!response || response.status < 200 || response.status >= 300) {
+      return null;
+    }
+
+    const data = response.json || JSON.parse(response.text || "{}");
+    const current = data && typeof data.current === "object" ? data.current : {};
+    return mapOpenMeteoWeatherToActivityIcon(current.weather_code, current.temperature_2m);
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildOpenMeteoActivityWeatherUrl(request) {
+  const params = new URLSearchParams({
+    latitude: String(request.latitude),
+    longitude: String(request.longitude),
+    current: "temperature_2m,weather_code",
+    timezone: "auto",
+    forecast_days: "1",
+  });
+
+  return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+}
+
+function mapOpenMeteoWeatherToActivityIcon(weatherCode, temperatureC) {
+  const extremeTemperatureIcon = getExtremeActivityTemperatureIcon(temperatureC);
+  if (extremeTemperatureIcon) {
+    return extremeTemperatureIcon;
+  }
+
+  const code = toOptionalNumber(weatherCode);
+  if (code === null) {
+    return null;
+  }
+
+  if (code === 0) {
+    return "☀️";
+  }
+
+  if (code === 1 || code === 2) {
+    return "🌤️";
+  }
+
+  if (code === 3) {
+    return "☁️";
+  }
+
+  if (code === 45 || code === 48) {
+    return "🌫️";
+  }
+
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+    return "🌦️";
+  }
+
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
+    return "🌨️";
+  }
+
+  if (code >= 95 && code <= 99) {
+    return "⛈️";
+  }
+
+  return null;
+}
+
+function getExtremeActivityTemperatureIcon(temperatureC) {
+  const temperature = toOptionalNumber(temperatureC);
+
+  if (temperature === null) {
+    return null;
+  }
+
+  if (temperature >= 38) {
+    return "🔥";
+  }
+
+  if (temperature <= -10) {
+    return "🥶";
+  }
+
+  return null;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, toNumber(ms))));
 }
 
 function renderDailyActivityBlocks(timestamps) {
@@ -2623,6 +2816,10 @@ function sanitizeTextSetting(value, fallback) {
   return text || fallback;
 }
 
+function sanitizeCoordinateSetting(value) {
+  return formatScalar(value).trim();
+}
+
 function formatTitle(value, fallback, useEmoji) {
   const title = stripMarkdownHeadingMarkers(value || fallback) || stripMarkdownHeadingMarkers(fallback);
   return useEmoji ? title : stripLeadingEmoji(title);
@@ -2654,6 +2851,15 @@ function formatNumber(value) {
 function toNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
+}
+
+function toOptionalNumber(value) {
+  if (value === null || typeof value === "undefined" || (typeof value === "string" && value.trim() === "")) {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function formatRepoTableHeader(useEmoji, tableFormat) {

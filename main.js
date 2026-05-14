@@ -13,8 +13,9 @@ const RECENT_AUTO_SCAN_SKIP_MS = 60 * 1000;
 const VIEW_OPEN_SCAN_DEBOUNCE_MS = 60 * 1000;
 const DEFAULT_DISCOVERY_DEPTH = 3;
 const DEFAULT_DISCOVERY_MAX_DIRECTORIES = 2000;
-const DEFAULT_SECTION_ORDER = ["gitScoreboard", "repositoryActivity", "cleanupChecklist"];
+const DEFAULT_SECTION_ORDER = ["activityBar", "gitScoreboard", "repositoryActivity", "cleanupChecklist"];
 const DASHBOARD_SECTIONS = [
+  { id: "activityBar", label: "Activity Bar" },
   { id: "gitScoreboard", label: "Git Scoreboard" },
   { id: "repositoryActivity", label: "Repository Activity" },
   { id: "cleanupChecklist", label: "Cleanup Checklist" },
@@ -679,28 +680,31 @@ class LjOsSettingTab extends PluginSettingTab {
         toggle.setValue(this.plugin.settings.showDailyActivityBar !== false).onChange(async (value) => {
           this.plugin.settings.showDailyActivityBar = value;
           await this.plugin.saveSettings();
+          this.display();
         })
       );
 
-    new Setting(containerEl)
-      .setName("Show moon phase icon")
-      .setDesc("Add a subtle moon phase emoji after the daily activity bar.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange(async (value) => {
-          this.plugin.settings.showActivityMoonIcon = value;
-          await this.plugin.saveSettings();
-        })
-      );
+    if (this.plugin.settings.showDailyActivityBar !== false) {
+      new Setting(containerEl)
+        .setName("Show moon phase icon")
+        .setDesc("Add a subtle moon phase emoji after the daily activity bar.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange(async (value) => {
+            this.plugin.settings.showActivityMoonIcon = value;
+            await this.plugin.saveSettings();
+          })
+        );
 
-    new Setting(containerEl)
-      .setName("Show 7-day activity view")
-      .setDesc("Show compact activity bars for the last 7 cached days.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange(async (value) => {
-          this.plugin.settings.showSevenDayActivity = value;
-          await this.plugin.saveSettings();
-        })
-      );
+      new Setting(containerEl)
+        .setName("Show 7-day activity view")
+        .setDesc("Show compact activity bars for the last 7 cached days.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange(async (value) => {
+            this.plugin.settings.showSevenDayActivity = value;
+            await this.plugin.saveSettings();
+          })
+        );
+    }
 
     new Setting(containerEl)
       .setName("Show summary section")
@@ -1227,16 +1231,14 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
   lines.push(...formatScanMetadataLines(gitSheet));
 
-  if (showDailyActivityBar) {
-    blocks.push(renderActivitySectionLines(gitSheet, {
-      recentGitSheets: renderSettings.recentGitSheets,
-      showMoonIcon: showActivityMoonIcon,
-      showSevenDayActivity,
-    }));
-  }
-
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
-    if (sectionId === "gitScoreboard" && showSummary) {
+    if (sectionId === "activityBar" && showDailyActivityBar) {
+      blocks.push(renderActivitySectionLines(gitSheet, {
+        recentGitSheets: renderSettings.recentGitSheets,
+        showMoonIcon: showActivityMoonIcon,
+        showSevenDayActivity,
+      }));
+    } else if (sectionId === "gitScoreboard" && showSummary) {
       blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
     } else if (sectionId === "repositoryActivity" && showRepoTable) {
       blocks.push(renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat));

@@ -733,7 +733,7 @@ class LjOsSettingTab extends PluginSettingTab {
       if (this.plugin.settings.showActivityWeatherIcon === true) {
         new Setting(containerEl)
           .setName("Weather latitude")
-          .setDesc("Optional latitude used only to fetch the Activity Bar weather icon.")
+          .setDesc("Optional decimal latitude used only for the weather icon. Las Vegas example: enter 36.1699 from 36.1699, -115.1398.")
           .addText((text) =>
             text
               .setPlaceholder("37.7749")
@@ -747,7 +747,7 @@ class LjOsSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
           .setName("Weather longitude")
-          .setDesc("Optional longitude used only to fetch the Activity Bar weather icon.")
+          .setDesc("Optional decimal longitude used only for the weather icon. Las Vegas example: enter -115.1398 from 36.1699, -115.1398.")
           .addText((text) =>
             text
               .setPlaceholder("-122.4194")

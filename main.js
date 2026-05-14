@@ -30,6 +30,9 @@ const DAILY_ACTIVITY_BUCKETS = [
 ];
 const ACTIVITY_BAR_EMPTY_BLOCK = "░";
 const ACTIVITY_BAR_ACTIVE_BLOCK = "█";
+const MOON_PHASE_EMOJIS = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
+const LUNAR_CYCLE_DAYS = 29.530588853;
+const KNOWN_NEW_MOON_UTC_MS = Date.UTC(2000, 0, 6, 18, 14);
 const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "node_modules",
   ".obsidian",
@@ -66,6 +69,7 @@ const DEFAULT_SETTINGS = {
   tidyView: "queue",
   tableFormat: "standard",
   showDailyActivityBar: true,
+  showActivityMoonIcon: false,
   sectionOrder: DEFAULT_SECTION_ORDER,
   showAdvancedSettings: false,
   showAdvancedScanningSettings: false,
@@ -658,6 +662,16 @@ class LjOsSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Show moon phase icon")
+      .setDesc("Add a subtle moon phase emoji after the daily activity bar.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange(async (value) => {
+          this.plugin.settings.showActivityMoonIcon = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Show summary section")
       .setDesc("Render the summary section.")
       .addToggle((toggle) =>
@@ -1169,6 +1183,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const tidyView = normalizeTidyView(renderSettings.tidyView);
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
   const showDailyActivityBar = renderSettings.showDailyActivityBar !== false;
+  const showActivityMoonIcon = renderSettings.showActivityMoonIcon === true;
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
   const showTidyQueue = renderSettings.showTidyQueue !== false;
@@ -1181,7 +1196,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(...formatScanMetadataLines(gitSheet));
 
   if (showDailyActivityBar) {
-    blocks.push(renderActivitySectionLines(gitSheet));
+    blocks.push(renderActivitySectionLines(gitSheet, showActivityMoonIcon));
   }
 
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
@@ -1222,16 +1237,18 @@ function renderMissingGitSheetMarkdown(settingsOrHeading) {
   return lines.join("\n").trimEnd();
 }
 
-function renderDailyActivityBar(timestamps, label = "Today") {
-  return `${formatScalar(label) || "Today"}  ${renderDailyActivityBlocks(timestamps)}`;
+function renderDailyActivityBar(timestamps, label = "Today", options = {}) {
+  const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
+  const bookend = moonIcon ? ` ${moonIcon}` : "";
+  return `${formatScalar(label) || "Today"}  ${renderDailyActivityBlocks(timestamps)}${bookend}`;
 }
 
-function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today") {
-  return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label);
+function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options = {}) {
+  return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label, options);
 }
 
-function renderActivitySectionLines(gitSheet) {
-  return ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet)];
+function renderActivitySectionLines(gitSheet, showActivityMoonIcon) {
+  return ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet, "Today", { showMoonIcon: showActivityMoonIcon })];
 }
 
 function renderDailyActivityBlocks(timestamps) {
@@ -1311,6 +1328,22 @@ function getDailyActivityBucketIndex(timestamp) {
   }
 
   return -1;
+}
+
+function getApproximateMoonPhaseEmoji(date = new Date()) {
+  try {
+    const timestampMs = date instanceof Date ? date.getTime() : new Date(date).getTime();
+    if (!Number.isFinite(timestampMs)) {
+      return "";
+    }
+
+    const daysSinceKnownNewMoon = (timestampMs - KNOWN_NEW_MOON_UTC_MS) / 86400000;
+    const cyclePosition = ((daysSinceKnownNewMoon % LUNAR_CYCLE_DAYS) + LUNAR_CYCLE_DAYS) % LUNAR_CYCLE_DAYS;
+    const phaseIndex = Math.floor(((cyclePosition / LUNAR_CYCLE_DAYS) * MOON_PHASE_EMOJIS.length) + 0.5) % MOON_PHASE_EMOJIS.length;
+    return MOON_PHASE_EMOJIS[phaseIndex] || "";
+  } catch (error) {
+    return "";
+  }
 }
 
 function formatScanMetadataLines(gitSheet) {

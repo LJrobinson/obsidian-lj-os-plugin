@@ -220,6 +220,7 @@ module.exports = class LjOsPlugin extends Plugin {
         maxDurationSeconds: this.settings.maxScanDurationSeconds,
       });
 
+      await this.addActivityWeatherToGitSheet(gitSheet);
       await this.writeGitSheet(gitSheet);
       this.completeScanState(gitSheet, startedAtMs);
 
@@ -352,7 +353,27 @@ module.exports = class LjOsPlugin extends Plugin {
     return entries;
   }
 
+  async addActivityWeatherToGitSheet(gitSheet) {
+    if (!gitSheet || typeof gitSheet !== "object") {
+      return;
+    }
+
+    try {
+      const activityWeather = await this.resolveActivityWeatherContext();
+      if (activityWeather) {
+        gitSheet.activityWeather = activityWeather;
+      }
+    } catch {
+      return;
+    }
+  }
+
   async resolveActivityWeatherIcon() {
+    const activityWeather = await this.resolveActivityWeatherContext();
+    return activityWeather ? activityWeather.emoji : null;
+  }
+
+  async resolveActivityWeatherContext() {
     const request = normalizeActivityWeatherRequest(this.settings);
 
     if (!request) {
@@ -364,16 +385,16 @@ module.exports = class LjOsPlugin extends Plugin {
       this.activityWeatherCache.key === request.key &&
       Date.now() - this.activityWeatherCache.fetchedAtMs < ACTIVITY_WEATHER_CACHE_MS
     ) {
-      return this.activityWeatherCache.icon;
+      return this.activityWeatherCache.context;
     }
 
-    const icon = await fetchOpenMeteoActivityWeatherIcon(request);
+    const context = await fetchOpenMeteoActivityWeatherContext(request);
     this.activityWeatherCache = {
       key: request.key,
       fetchedAtMs: Date.now(),
-      icon,
+      context,
     };
-    return icon;
+    return context;
   }
 
   async discoverRepositories(options = {}) {
@@ -1433,7 +1454,7 @@ function normalizeActivityWeatherRequest(settings = {}) {
   };
 }
 
-async function fetchOpenMeteoActivityWeatherIcon(request) {
+async function fetchOpenMeteoActivityWeatherContext(request) {
   if (!request || typeof requestUrl !== "function") {
     return null;
   }
@@ -1453,7 +1474,18 @@ async function fetchOpenMeteoActivityWeatherIcon(request) {
 
     const data = response.json || JSON.parse(response.text || "{}");
     const current = data && typeof data.current === "object" ? data.current : {};
-    return mapOpenMeteoWeatherToActivityIcon(current.weather_code, current.temperature_2m);
+    const activityWeather = mapOpenMeteoWeatherToActivityContext(current.weather_code, current.temperature_2m);
+
+    if (!activityWeather) {
+      return null;
+    }
+
+    return {
+      emoji: activityWeather.emoji,
+      label: activityWeather.label,
+      source: "open-meteo",
+      fetchedAt: new Date().toISOString(),
+    };
   } catch (error) {
     return null;
   }
@@ -1471,10 +1503,10 @@ function buildOpenMeteoActivityWeatherUrl(request) {
   return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
 }
 
-function mapOpenMeteoWeatherToActivityIcon(weatherCode, temperatureC) {
-  const extremeTemperatureIcon = getExtremeActivityTemperatureIcon(temperatureC);
-  if (extremeTemperatureIcon) {
-    return extremeTemperatureIcon;
+function mapOpenMeteoWeatherToActivityContext(weatherCode, temperatureC) {
+  const extremeTemperature = getExtremeActivityTemperatureContext(temperatureC);
+  if (extremeTemperature) {
+    return extremeTemperature;
   }
 
   const code = toOptionalNumber(weatherCode);
@@ -1483,37 +1515,37 @@ function mapOpenMeteoWeatherToActivityIcon(weatherCode, temperatureC) {
   }
 
   if (code === 0) {
-    return "☀️";
+    return { emoji: "☀️", label: "Clear" };
   }
 
   if (code === 1 || code === 2) {
-    return "🌤️";
+    return { emoji: "🌤️", label: "Partly cloudy" };
   }
 
   if (code === 3) {
-    return "☁️";
+    return { emoji: "☁️", label: "Cloudy" };
   }
 
   if (code === 45 || code === 48) {
-    return "🌫️";
+    return { emoji: "🌫️", label: "Fog" };
   }
 
   if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
-    return "🌦️";
+    return { emoji: "🌦️", label: "Rain" };
   }
 
   if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
-    return "🌨️";
+    return { emoji: "🌨️", label: "Snow" };
   }
 
   if (code >= 95 && code <= 99) {
-    return "⛈️";
+    return { emoji: "⛈️", label: "Thunderstorm" };
   }
 
   return null;
 }
 
-function getExtremeActivityTemperatureIcon(temperatureC) {
+function getExtremeActivityTemperatureContext(temperatureC) {
   const temperature = toOptionalNumber(temperatureC);
 
   if (temperature === null) {
@@ -1521,11 +1553,11 @@ function getExtremeActivityTemperatureIcon(temperatureC) {
   }
 
   if (temperature >= 38) {
-    return "🔥";
+    return { emoji: "🔥", label: "Very hot" };
   }
 
   if (temperature <= -10) {
-    return "🥶";
+    return { emoji: "🥶", label: "Very cold" };
   }
 
   return null;

@@ -71,6 +71,7 @@ const DEFAULT_SETTINGS = {
   tidyView: "queue",
   tableFormat: "standard",
   showDailyActivityBar: true,
+  showActivityWeatherIcon: false,
   showActivityMoonIcon: false,
   showSevenDayActivity: false,
   sectionOrder: DEFAULT_SECTION_ORDER,
@@ -686,6 +687,16 @@ class LjOsSettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.showDailyActivityBar !== false) {
       new Setting(containerEl)
+        .setName("Show weather icon")
+        .setDesc("Add a subtle weather emoji before the daily activity bar when weather data is available.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showActivityWeatherIcon === true).onChange(async (value) => {
+            this.plugin.settings.showActivityWeatherIcon = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(containerEl)
         .setName("Show moon phase icon")
         .setDesc("Add a subtle moon phase emoji after the daily activity bar.")
         .addToggle((toggle) =>
@@ -1218,6 +1229,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const tidyView = normalizeTidyView(renderSettings.tidyView);
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
   const showDailyActivityBar = renderSettings.showDailyActivityBar !== false;
+  const showActivityWeatherIcon = renderSettings.showActivityWeatherIcon === true;
   const showActivityMoonIcon = renderSettings.showActivityMoonIcon === true;
   const showSevenDayActivity = renderSettings.showSevenDayActivity === true;
   const showSummary = renderSettings.showSummary !== false;
@@ -1235,6 +1247,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
     if (sectionId === "activityBar" && showDailyActivityBar) {
       blocks.push(renderActivitySectionLines(gitSheet, {
         recentGitSheets: renderSettings.recentGitSheets,
+        showWeatherIcon: showActivityWeatherIcon,
         showMoonIcon: showActivityMoonIcon,
         showSevenDayActivity,
       }));
@@ -1276,9 +1289,11 @@ function renderMissingGitSheetMarkdown(settingsOrHeading) {
 }
 
 function renderDailyActivityBar(timestamps, label = "Today", options = {}) {
+  const weatherIcon = getActivityWeatherIcon(options);
+  const weatherPrefix = weatherIcon ? `${weatherIcon} ` : "";
   const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
   const bookend = moonIcon ? ` ${moonIcon}` : "";
-  return `${formatScalar(label) || "Today"}  ${renderDailyActivityBlocks(timestamps)}${bookend}`;
+  return `${formatScalar(label) || "Today"}  ${weatherPrefix}${renderDailyActivityBlocks(timestamps)}${bookend}`;
 }
 
 function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options = {}) {
@@ -1286,15 +1301,21 @@ function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options =
 }
 
 function renderSevenDayActivityBarFromGitSheet(gitSheet, label, options = {}) {
+  const weatherIcon = getActivityWeatherIcon(options);
+  const weatherPrefix = weatherIcon ? `${weatherIcon} ` : "";
   const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
   const bookend = moonIcon ? ` ${moonIcon}` : "";
-  return `${padActivityDayLabel(label)}  ${renderQuietDailyActivityBlocks(collectGitSheetActivityTimestamps(gitSheet))}${bookend}`;
+  return `${padActivityDayLabel(label)}  ${weatherPrefix}${renderQuietDailyActivityBlocks(collectGitSheetActivityTimestamps(gitSheet))}${bookend}`;
 }
 
 function renderActivitySectionLines(gitSheet, options = {}) {
+  const showWeatherIcon = options.showWeatherIcon === true;
+  const weatherIcon = getActivityWeatherIcon(options);
   const showMoonIcon = options.showMoonIcon === true;
   const lines = ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet, "Today", {
     date: getGitSheetActivityDate(gitSheet),
+    showWeatherIcon,
+    weatherIcon,
     showMoonIcon,
   })];
 
@@ -1304,12 +1325,21 @@ function renderActivitySectionLines(gitSheet, options = {}) {
     for (const entry of getSevenDayActivityEntries(gitSheet, options.recentGitSheets)) {
       lines.push(renderSevenDayActivityBarFromGitSheet(entry.gitSheet, entry.label, {
         date: entry.date,
+        showWeatherIcon,
         showMoonIcon,
       }));
     }
   }
 
   return lines;
+}
+
+function getActivityWeatherIcon(options = {}) {
+  if (options.showWeatherIcon !== true) {
+    return null;
+  }
+
+  return formatScalar(options.weatherIcon) || null;
 }
 
 function renderDailyActivityBlocks(timestamps) {

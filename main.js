@@ -70,6 +70,7 @@ const DEFAULT_SETTINGS = {
   tableFormat: "standard",
   showDailyActivityBar: true,
   showActivityMoonIcon: false,
+  showSevenDayActivity: false,
   sectionOrder: DEFAULT_SECTION_ORDER,
   showAdvancedSettings: false,
   showAdvancedScanningSettings: false,
@@ -143,16 +144,15 @@ module.exports = class LjOsPlugin extends Plugin {
   }
 
   getTodayStamp() {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const day = String(now.getDate()).padStart(2, "0");
+    return formatLocalDateStamp(new Date());
+  }
 
-    return `${year}-${month}-${day}`;
+  getGitSheetPathForDate(dateStamp) {
+    return joinVaultPath(this.settings.dynoSheetFolder, `${formatScalar(dateStamp)}.json`);
   }
 
   getTodaysGitSheetPath() {
-    return joinVaultPath(this.settings.dynoSheetFolder, `${this.getTodayStamp()}.json`);
+    return this.getGitSheetPathForDate(this.getTodayStamp());
   }
 
   getTodaysDailyNotePath() {
@@ -264,6 +264,10 @@ module.exports = class LjOsPlugin extends Plugin {
 
   async insertTodaysGitSheet() {
     const gitSheet = await this.readTodaysGitSheet();
+    const recentGitSheets =
+      gitSheet && this.settings.showDailyActivityBar !== false && this.settings.showSevenDayActivity === true
+        ? await this.readRecentGitSheets(7)
+        : [];
 
     const dailyNotePath = this.getTodaysDailyNotePath();
     const dailyNoteFolder = getFolderPart(dailyNotePath);
@@ -293,8 +297,9 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     const existingContent = await this.app.vault.read(dailyNoteFile);
+    const renderSettings = Object.assign({}, this.settings, { recentGitSheets });
     const sectionMarkdown = gitSheet
-      ? renderGitSheetMarkdown(gitSheet, this.settings)
+      ? renderGitSheetMarkdown(gitSheet, renderSettings)
       : renderMissingGitSheetMarkdown(this.settings);
     const updatedContent = upsertSection(existingContent, this.settings.dailySectionHeading, sectionMarkdown);
 
@@ -305,7 +310,11 @@ module.exports = class LjOsPlugin extends Plugin {
   }
 
   async readTodaysGitSheet() {
-    const gitSheetPath = this.getTodaysGitSheetPath();
+    return this.readGitSheetForDate(this.getTodayStamp());
+  }
+
+  async readGitSheetForDate(dateStamp) {
+    const gitSheetPath = this.getGitSheetPathForDate(dateStamp);
     const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
 
     if (!(gitSheetFile instanceof TFile)) {
@@ -319,6 +328,17 @@ module.exports = class LjOsPlugin extends Plugin {
       console.error("Failed to parse existing LJ OS Git Wall JSON", error);
       return null;
     }
+  }
+
+  async readRecentGitSheets(dayCount = 7) {
+    const dateInfos = getRecentLocalDateInfos(dayCount);
+    const entries = [];
+
+    for (const dateInfo of dateInfos) {
+      entries.push(Object.assign({}, dateInfo, { gitSheet: await this.readGitSheetForDate(dateInfo.dateStamp) }));
+    }
+
+    return entries;
   }
 
   async discoverRepositories(options = {}) {
@@ -667,6 +687,16 @@ class LjOsSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange(async (value) => {
           this.plugin.settings.showActivityMoonIcon = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show 7-day activity view")
+      .setDesc("Show compact activity bars for the last 7 cached days.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange(async (value) => {
+          this.plugin.settings.showSevenDayActivity = value;
           await this.plugin.saveSettings();
         })
       );
@@ -1184,6 +1214,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
   const showDailyActivityBar = renderSettings.showDailyActivityBar !== false;
   const showActivityMoonIcon = renderSettings.showActivityMoonIcon === true;
+  const showSevenDayActivity = renderSettings.showSevenDayActivity === true;
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
   const showTidyQueue = renderSettings.showTidyQueue !== false;
@@ -1196,7 +1227,11 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(...formatScanMetadataLines(gitSheet));
 
   if (showDailyActivityBar) {
-    blocks.push(renderActivitySectionLines(gitSheet, showActivityMoonIcon));
+    blocks.push(renderActivitySectionLines(gitSheet, {
+      recentGitSheets: renderSettings.recentGitSheets,
+      showMoonIcon: showActivityMoonIcon,
+      showSevenDayActivity,
+    }));
   }
 
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
@@ -1247,8 +1282,25 @@ function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options =
   return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label, options);
 }
 
-function renderActivitySectionLines(gitSheet, showActivityMoonIcon) {
-  return ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet, "Today", { showMoonIcon: showActivityMoonIcon })];
+function renderActivitySectionLines(gitSheet, options = {}) {
+  const showMoonIcon = options.showMoonIcon === true;
+  const lines = ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet, "Today", {
+    date: getGitSheetActivityDate(gitSheet),
+    showMoonIcon,
+  })];
+
+  if (options.showSevenDayActivity === true) {
+    lines.push("", "7-Day");
+
+    for (const entry of getSevenDayActivityEntries(gitSheet, options.recentGitSheets)) {
+      lines.push(renderDailyActivityBarFromGitSheet(entry.gitSheet, entry.label, {
+        date: entry.date,
+        showMoonIcon,
+      }));
+    }
+  }
+
+  return lines;
 }
 
 function renderDailyActivityBlocks(timestamps) {
@@ -1328,6 +1380,25 @@ function getDailyActivityBucketIndex(timestamp) {
   }
 
   return -1;
+}
+
+function getSevenDayActivityEntries(todayGitSheet, recentGitSheets) {
+  if (Array.isArray(recentGitSheets) && recentGitSheets.length > 0) {
+    return recentGitSheets.slice(-7);
+  }
+
+  const todayDate = getGitSheetActivityDate(todayGitSheet);
+  const todayStamp = formatScalar(todayGitSheet && todayGitSheet.date) || formatLocalDateStamp(todayDate);
+
+  return getRecentLocalDateInfos(7, todayDate).map((dateInfo) =>
+    Object.assign({}, dateInfo, {
+      gitSheet: dateInfo.dateStamp === todayStamp ? todayGitSheet : null,
+    })
+  );
+}
+
+function getGitSheetActivityDate(gitSheet) {
+  return parseLocalDateStamp(gitSheet && gitSheet.date) || new Date();
 }
 
 function getApproximateMoonPhaseEmoji(date = new Date()) {
@@ -2428,6 +2499,52 @@ function normalizeRenderSettings(settingsOrHeading) {
   }
 
   return Object.assign({}, DEFAULT_SETTINGS, settingsOrHeading || {});
+}
+
+function getRecentLocalDateInfos(dayCount = 7, endDate = new Date()) {
+  const count = Math.max(1, Math.floor(toNumber(dayCount)) || 7);
+  const end = endDate instanceof Date && Number.isFinite(endDate.getTime()) ? endDate : new Date();
+  const todayStamp = formatLocalDateStamp(new Date());
+  const dates = [];
+
+  for (let offset = count - 1; offset >= 0; offset -= 1) {
+    const date = new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset, 12, 0, 0, 0);
+    const dateStamp = formatLocalDateStamp(date);
+    dates.push({
+      date,
+      dateStamp,
+      label: dateStamp === todayStamp ? "Today" : formatShortWeekday(date),
+    });
+  }
+
+  return dates;
+}
+
+function formatLocalDateStamp(date) {
+  const value = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date();
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function parseLocalDateStamp(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(formatScalar(value));
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(year, month, day, 12, 0, 0, 0);
+
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function formatShortWeekday(date) {
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()] || "";
 }
 
 function normalizeTableFormat(value) {

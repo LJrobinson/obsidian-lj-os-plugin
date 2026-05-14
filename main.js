@@ -1388,7 +1388,7 @@ function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options =
 
 function renderSevenDayActivityBarFromGitSheet(gitSheet, label, options = {}) {
   const weatherIcon = getActivityWeatherIcon(options);
-  const weatherPrefix = weatherIcon ? `${weatherIcon} ` : "";
+  const weatherPrefix = options.showWeatherIcon === true ? `${weatherIcon || "  "} ` : "";
   const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
   const bookend = moonIcon ? ` ${moonIcon}` : "";
   return `${padActivityDayLabel(label)}  ${weatherPrefix}${renderQuietDailyActivityBlocks(collectGitSheetActivityTimestamps(gitSheet))}${bookend}`;
@@ -1412,6 +1412,7 @@ function renderActivitySectionLines(gitSheet, options = {}) {
       lines.push(renderSevenDayActivityBarFromGitSheet(entry.gitSheet, entry.label, {
         date: entry.date,
         showWeatherIcon,
+        weatherIcon: getCachedActivityWeatherIcon(entry.gitSheet),
         showMoonIcon,
       }));
     }
@@ -1426,6 +1427,14 @@ function getActivityWeatherIcon(options = {}) {
   }
 
   return formatScalar(options.weatherIcon) || null;
+}
+
+function getCachedActivityWeatherIcon(gitSheet) {
+  if (!gitSheet || typeof gitSheet !== "object" || !gitSheet.activityWeather || typeof gitSheet.activityWeather !== "object") {
+    return null;
+  }
+
+  return formatScalar(gitSheet.activityWeather.emoji) || null;
 }
 
 function normalizeActivityWeatherRequest(settings = {}) {

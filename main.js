@@ -1,4 +1,4 @@
-const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath } = require("obsidian");
+const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, requestUrl } = require("obsidian");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -11,14 +11,33 @@ const DEFAULT_MAX_SCAN_DURATION_SECONDS = 30;
 const MIN_MAX_SCAN_DURATION_SECONDS = 5;
 const RECENT_AUTO_SCAN_SKIP_MS = 60 * 1000;
 const VIEW_OPEN_SCAN_DEBOUNCE_MS = 60 * 1000;
+const ACTIVITY_WEATHER_CACHE_MS = 30 * 60 * 1000;
+const ACTIVITY_WEATHER_FETCH_TIMEOUT_MS = 2500;
 const DEFAULT_DISCOVERY_DEPTH = 3;
 const DEFAULT_DISCOVERY_MAX_DIRECTORIES = 2000;
-const DEFAULT_SECTION_ORDER = ["gitScoreboard", "repositoryActivity", "cleanupChecklist"];
+const DEFAULT_SECTION_ORDER = ["activityBar", "gitScoreboard", "repositoryActivity", "cleanupChecklist"];
 const DASHBOARD_SECTIONS = [
+  { id: "activityBar", label: "Activity Bar" },
   { id: "gitScoreboard", label: "Git Scoreboard" },
   { id: "repositoryActivity", label: "Repository Activity" },
   { id: "cleanupChecklist", label: "Cleanup Checklist" },
 ];
+const DAILY_ACTIVITY_BUCKETS = [
+  { startHour: 0, endHour: 3 },
+  { startHour: 3, endHour: 6 },
+  { startHour: 6, endHour: 9 },
+  { startHour: 9, endHour: 12 },
+  { startHour: 12, endHour: 15 },
+  { startHour: 15, endHour: 18 },
+  { startHour: 18, endHour: 24 },
+];
+const ACTIVITY_BAR_EMPTY_BLOCK = "⬛";
+const ACTIVITY_BAR_ACTIVE_BLOCK = "🟩";
+const ACTIVITY_BAR_QUIET_EMPTY_BLOCK = "⬛";
+const ACTIVITY_BAR_QUIET_ACTIVE_BLOCK = "🟩";
+const MOON_PHASE_EMOJIS = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
+const LUNAR_CYCLE_DAYS = 29.530588853;
+const KNOWN_NEW_MOON_UTC_MS = Date.UTC(2000, 0, 6, 18, 14);
 const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "node_modules",
   ".obsidian",
@@ -54,6 +73,13 @@ const DEFAULT_SETTINGS = {
   showTidyQueue: true,
   tidyView: "queue",
   tableFormat: "standard",
+  showDailyActivityBar: true,
+  showActivityWeatherIcon: false,
+  activityWeatherLatitude: "",
+  activityWeatherLongitude: "",
+  showActivityMoonIcon: false,
+  showThreeDayActivity: false,
+  showSevenDayActivity: false,
   sectionOrder: DEFAULT_SECTION_ORDER,
   showAdvancedSettings: false,
   showAdvancedScanningSettings: false,
@@ -62,6 +88,7 @@ const DEFAULT_SETTINGS = {
 module.exports = class LjOsPlugin extends Plugin {
   async onload() {
     this.autoScanIntervalId = null;
+    this.activityWeatherCache = null;
     this.startupScanTimeoutId = null;
     this.lastViewOpenScanRequestedAt = 0;
     this.suppressViewOpenScanUntil = 0;
@@ -113,6 +140,8 @@ module.exports = class LjOsPlugin extends Plugin {
     this.settings.autoScanEnabled = savedSettings.autoScanEnabled !== false;
     this.settings.scanOnViewOpen = savedSettings.scanOnViewOpen !== false;
     this.settings.showAdvancedScanningSettings = savedSettings.showAdvancedScanningSettings === true;
+    this.settings.activityWeatherLatitude = sanitizeCoordinateSetting(this.settings.activityWeatherLatitude);
+    this.settings.activityWeatherLongitude = sanitizeCoordinateSetting(this.settings.activityWeatherLongitude);
     this.settings.sectionOrder = normalizeSectionOrder(this.settings.sectionOrder);
     this.scanState = normalizeScanState(savedSettings.scanState);
     if (this.scanState.isScanRunning) {
@@ -127,16 +156,15 @@ module.exports = class LjOsPlugin extends Plugin {
   }
 
   getTodayStamp() {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const day = String(now.getDate()).padStart(2, "0");
+    return formatLocalDateStamp(new Date());
+  }
 
-    return `${year}-${month}-${day}`;
+  getGitSheetPathForDate(dateStamp) {
+    return joinVaultPath(this.settings.dynoSheetFolder, `${formatScalar(dateStamp)}.json`);
   }
 
   getTodaysGitSheetPath() {
-    return joinVaultPath(this.settings.dynoSheetFolder, `${this.getTodayStamp()}.json`);
+    return this.getGitSheetPathForDate(this.getTodayStamp());
   }
 
   getTodaysDailyNotePath() {
@@ -194,6 +222,7 @@ module.exports = class LjOsPlugin extends Plugin {
         maxDurationSeconds: this.settings.maxScanDurationSeconds,
       });
 
+      await this.addActivityWeatherToGitSheet(gitSheet);
       await this.writeGitSheet(gitSheet);
       this.completeScanState(gitSheet, startedAtMs);
 
@@ -248,6 +277,11 @@ module.exports = class LjOsPlugin extends Plugin {
 
   async insertTodaysGitSheet() {
     const gitSheet = await this.readTodaysGitSheet();
+    const recentActivityDayCount = getRecentActivityDayCount(this.settings);
+    const recentGitSheets =
+      gitSheet && recentActivityDayCount > 0
+        ? await this.readRecentGitSheets(recentActivityDayCount)
+        : [];
 
     const dailyNotePath = this.getTodaysDailyNotePath();
     const dailyNoteFolder = getFolderPart(dailyNotePath);
@@ -277,8 +311,10 @@ module.exports = class LjOsPlugin extends Plugin {
     }
 
     const existingContent = await this.app.vault.read(dailyNoteFile);
+    const activityWeatherIcon = gitSheet ? await this.resolveActivityWeatherIcon() : null;
+    const renderSettings = Object.assign({}, this.settings, { recentGitSheets, activityWeatherIcon });
     const sectionMarkdown = gitSheet
-      ? renderGitSheetMarkdown(gitSheet, this.settings)
+      ? renderGitSheetMarkdown(gitSheet, renderSettings)
       : renderMissingGitSheetMarkdown(this.settings);
     const updatedContent = upsertSection(existingContent, this.settings.dailySectionHeading, sectionMarkdown);
 
@@ -289,7 +325,11 @@ module.exports = class LjOsPlugin extends Plugin {
   }
 
   async readTodaysGitSheet() {
-    const gitSheetPath = this.getTodaysGitSheetPath();
+    return this.readGitSheetForDate(this.getTodayStamp());
+  }
+
+  async readGitSheetForDate(dateStamp) {
+    const gitSheetPath = this.getGitSheetPathForDate(dateStamp);
     const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
 
     if (!(gitSheetFile instanceof TFile)) {
@@ -303,6 +343,61 @@ module.exports = class LjOsPlugin extends Plugin {
       console.error("Failed to parse existing LJ OS Git Wall JSON", error);
       return null;
     }
+  }
+
+  async readRecentGitSheets(dayCount = 7) {
+    const dateInfos = getRecentLocalDateInfos(dayCount);
+    const entries = [];
+
+    for (const dateInfo of dateInfos) {
+      entries.push(Object.assign({}, dateInfo, { gitSheet: await this.readGitSheetForDate(dateInfo.dateStamp) }));
+    }
+
+    return entries;
+  }
+
+  async addActivityWeatherToGitSheet(gitSheet) {
+    if (!gitSheet || typeof gitSheet !== "object") {
+      return;
+    }
+
+    try {
+      const activityWeather = await this.resolveActivityWeatherContext();
+      if (activityWeather) {
+        gitSheet.activityWeather = activityWeather;
+      }
+    } catch {
+      return;
+    }
+  }
+
+  async resolveActivityWeatherIcon() {
+    const activityWeather = await this.resolveActivityWeatherContext();
+    return activityWeather ? activityWeather.emoji : null;
+  }
+
+  async resolveActivityWeatherContext() {
+    const request = normalizeActivityWeatherRequest(this.settings);
+
+    if (!request) {
+      return null;
+    }
+
+    if (
+      this.activityWeatherCache &&
+      this.activityWeatherCache.key === request.key &&
+      Date.now() - this.activityWeatherCache.fetchedAtMs < ACTIVITY_WEATHER_CACHE_MS
+    ) {
+      return this.activityWeatherCache.context;
+    }
+
+    const context = await fetchOpenMeteoActivityWeatherContext(request);
+    this.activityWeatherCache = {
+      key: request.key,
+      fetchedAtMs: Date.now(),
+      context,
+    };
+    return context;
   }
 
   async discoverRepositories(options = {}) {
@@ -634,6 +729,99 @@ class LjOsSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Show daily activity bar")
+      .setDesc("Show a compact timeline of when activity happened today.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.showDailyActivityBar !== false).onChange(async (value) => {
+          this.plugin.settings.showDailyActivityBar = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    if (this.plugin.settings.showDailyActivityBar !== false) {
+      new Setting(containerEl)
+        .setName("Show weather icon")
+        .setDesc("Add a subtle weather emoji before the daily activity bar when weather data is available.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showActivityWeatherIcon === true).onChange(async (value) => {
+            this.plugin.settings.showActivityWeatherIcon = value;
+            this.plugin.activityWeatherCache = null;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+        );
+
+      if (this.plugin.settings.showActivityWeatherIcon === true) {
+        new Setting(containerEl)
+          .setName("Weather latitude")
+          .setDesc("Optional decimal latitude used only for the weather icon. Las Vegas example: enter 36.1699 from 36.1699, -115.1398.")
+          .addText((text) =>
+            text
+              .setPlaceholder("37.7749")
+              .setValue(this.plugin.settings.activityWeatherLatitude)
+              .onChange(async (value) => {
+                this.plugin.settings.activityWeatherLatitude = sanitizeCoordinateSetting(value);
+                this.plugin.activityWeatherCache = null;
+                await this.plugin.saveSettings();
+              })
+          );
+
+        new Setting(containerEl)
+          .setName("Weather longitude")
+          .setDesc("Optional decimal longitude used only for the weather icon. Las Vegas example: enter -115.1398 from 36.1699, -115.1398.")
+          .addText((text) =>
+            text
+              .setPlaceholder("-122.4194")
+              .setValue(this.plugin.settings.activityWeatherLongitude)
+              .onChange(async (value) => {
+                this.plugin.settings.activityWeatherLongitude = sanitizeCoordinateSetting(value);
+                this.plugin.activityWeatherCache = null;
+                await this.plugin.saveSettings();
+              })
+          );
+      }
+
+      new Setting(containerEl)
+        .setName("Show moon phase icon")
+        .setDesc("Add a subtle moon phase emoji after the daily activity bar.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange(async (value) => {
+            this.plugin.settings.showActivityMoonIcon = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(containerEl)
+        .setName("Show 3-day activity view")
+        .setDesc("Show compact activity bars for the last 3 cached days.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showThreeDayActivity === true).onChange(async (value) => {
+            this.plugin.settings.showThreeDayActivity = value;
+            if (value) {
+              this.plugin.settings.showSevenDayActivity = false;
+            }
+            await this.plugin.saveSettings();
+            this.display();
+          })
+        );
+
+      new Setting(containerEl)
+        .setName("Show 7-day activity view")
+        .setDesc("Show compact activity bars for the last 7 cached days.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange(async (value) => {
+            this.plugin.settings.showSevenDayActivity = value;
+            if (value) {
+              this.plugin.settings.showThreeDayActivity = false;
+            }
+            await this.plugin.saveSettings();
+            this.display();
+          })
+        );
+    }
 
     new Setting(containerEl)
       .setName("Show summary section")
@@ -1146,6 +1334,11 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   const repoView = normalizeRepoView(renderSettings.repoView);
   const tidyView = normalizeTidyView(renderSettings.tidyView);
   const tableFormat = normalizeTableFormat(renderSettings.tableFormat);
+  const showDailyActivityBar = renderSettings.showDailyActivityBar !== false;
+  const showActivityWeatherIcon = renderSettings.showActivityWeatherIcon === true;
+  const showActivityMoonIcon = renderSettings.showActivityMoonIcon === true;
+  const showThreeDayActivity = renderSettings.showThreeDayActivity === true;
+  const showSevenDayActivity = renderSettings.showSevenDayActivity === true;
   const showSummary = renderSettings.showSummary !== false;
   const showRepoTable = renderSettings.showRepoTable !== false;
   const showTidyQueue = renderSettings.showTidyQueue !== false;
@@ -1158,7 +1351,16 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(...formatScanMetadataLines(gitSheet));
 
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
-    if (sectionId === "gitScoreboard" && showSummary) {
+    if (sectionId === "activityBar" && showDailyActivityBar) {
+      blocks.push(renderActivitySectionLines(gitSheet, {
+        recentGitSheets: renderSettings.recentGitSheets,
+        showWeatherIcon: showActivityWeatherIcon,
+        weatherIcon: renderSettings.activityWeatherIcon,
+        showMoonIcon: showActivityMoonIcon,
+        showThreeDayActivity,
+        showSevenDayActivity,
+      }));
+    } else if (sectionId === "gitScoreboard" && showSummary) {
       blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
     } else if (sectionId === "repositoryActivity" && showRepoTable) {
       blocks.push(renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat));
@@ -1193,6 +1395,396 @@ function renderMissingGitSheetMarkdown(settingsOrHeading) {
   ];
 
   return lines.join("\n").trimEnd();
+}
+
+function renderDailyActivityBar(timestamps, label = "Today", options = {}) {
+  const weatherIcon = getActivityWeatherIcon(options);
+  const weatherPrefix = weatherIcon ? `${weatherIcon} ` : "";
+  const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
+  const bookend = moonIcon ? ` ${moonIcon}` : "";
+  return `${formatScalar(label) || "Today"}  ${weatherPrefix}${renderDailyActivityBlocks(timestamps)}${bookend}`;
+}
+
+function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options = {}) {
+  return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label, options);
+}
+
+function renderActivitySectionLines(gitSheet, options = {}) {
+  const showWeatherIcon = options.showWeatherIcon === true;
+  const weatherIcon = getActivityWeatherIcon(options);
+  const showMoonIcon = options.showMoonIcon === true;
+  const lines = ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet, "Today", {
+    date: getGitSheetActivityDate(gitSheet),
+    showWeatherIcon,
+    weatherIcon,
+    showMoonIcon,
+  })];
+
+  if (options.showThreeDayActivity === true) {
+    lines.push("", "3-Day", "", ...renderRecentActivityTableLines(gitSheet, {
+      dayCount: 3,
+      recentGitSheets: options.recentGitSheets,
+      showWeatherIcon,
+      showMoonIcon,
+    }));
+  }
+
+  if (options.showSevenDayActivity === true) {
+    lines.push("", "7-Day", "", ...renderRecentActivityTableLines(gitSheet, {
+      dayCount: 7,
+      recentGitSheets: options.recentGitSheets,
+      showWeatherIcon,
+      showMoonIcon,
+    }));
+  }
+
+  return lines;
+}
+
+function renderRecentActivityTableLines(gitSheet, options = {}) {
+  const showWeatherIcon = options.showWeatherIcon === true;
+  const showMoonIcon = options.showMoonIcon === true;
+  const dayCount = normalizeRecentActivityDayCount(options.dayCount);
+  const headers = ["Day"];
+  const divider = [":---:"];
+
+  if (showWeatherIcon) {
+    headers.push("Weather");
+    divider.push(":---:");
+  }
+
+  headers.push("Activity");
+  divider.push(":---:");
+
+  if (showMoonIcon) {
+    headers.push("Moon");
+    divider.push(":---:");
+  }
+
+  const lines = [toMarkdownTableRow(headers), toMarkdownTableRow(divider)];
+
+  for (const entry of getRecentActivityEntries(gitSheet, options.recentGitSheets, dayCount)) {
+    const row = [formatScalar(entry.label) || "Day"];
+
+    if (showWeatherIcon) {
+      row.push(getCachedActivityWeatherIcon(entry.gitSheet) || "");
+    }
+
+    row.push(renderQuietDailyActivityBlocks(collectGitSheetActivityTimestamps(entry.gitSheet)));
+
+    if (showMoonIcon) {
+      row.push(getApproximateMoonPhaseEmoji(entry.date || new Date()));
+    }
+
+    lines.push(toMarkdownTableRow(row));
+  }
+
+  return lines;
+}
+
+function getActivityWeatherIcon(options = {}) {
+  if (options.showWeatherIcon !== true) {
+    return null;
+  }
+
+  return formatScalar(options.weatherIcon) || null;
+}
+
+function getCachedActivityWeatherIcon(gitSheet) {
+  if (!gitSheet || typeof gitSheet !== "object" || !gitSheet.activityWeather || typeof gitSheet.activityWeather !== "object") {
+    return null;
+  }
+
+  return formatScalar(gitSheet.activityWeather.emoji) || null;
+}
+
+function normalizeActivityWeatherRequest(settings = {}) {
+  if (settings.showDailyActivityBar === false || settings.showActivityWeatherIcon !== true) {
+    return null;
+  }
+
+  const latitudeText = sanitizeCoordinateSetting(settings.activityWeatherLatitude);
+  const longitudeText = sanitizeCoordinateSetting(settings.activityWeatherLongitude);
+
+  if (!latitudeText || !longitudeText) {
+    return null;
+  }
+
+  const latitude = toOptionalNumber(latitudeText);
+  const longitude = toOptionalNumber(longitudeText);
+
+  if (latitude === null || longitude === null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+    key: `${latitude.toFixed(4)},${longitude.toFixed(4)}`,
+  };
+}
+
+async function fetchOpenMeteoActivityWeatherContext(request) {
+  if (!request || typeof requestUrl !== "function") {
+    return null;
+  }
+
+  try {
+    const response = await Promise.race([
+      requestUrl({
+        url: buildOpenMeteoActivityWeatherUrl(request),
+        method: "GET",
+      }).catch(() => null),
+      delay(ACTIVITY_WEATHER_FETCH_TIMEOUT_MS).then(() => null),
+    ]);
+
+    if (!response || response.status < 200 || response.status >= 300) {
+      return null;
+    }
+
+    const data = response.json || JSON.parse(response.text || "{}");
+    const current = data && typeof data.current === "object" ? data.current : {};
+    const activityWeather = mapOpenMeteoWeatherToActivityContext(current.weather_code, current.temperature_2m);
+
+    if (!activityWeather) {
+      return null;
+    }
+
+    return {
+      emoji: activityWeather.emoji,
+      label: activityWeather.label,
+      source: "open-meteo",
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildOpenMeteoActivityWeatherUrl(request) {
+  const params = new URLSearchParams({
+    latitude: String(request.latitude),
+    longitude: String(request.longitude),
+    current: "temperature_2m,weather_code",
+    timezone: "auto",
+    forecast_days: "1",
+  });
+
+  return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+}
+
+function mapOpenMeteoWeatherToActivityContext(weatherCode, temperatureC) {
+  const extremeTemperature = getExtremeActivityTemperatureContext(temperatureC);
+  if (extremeTemperature) {
+    return extremeTemperature;
+  }
+
+  const code = toOptionalNumber(weatherCode);
+  if (code === null) {
+    return null;
+  }
+
+  if (code === 0) {
+    return { emoji: "☀️", label: "Clear" };
+  }
+
+  if (code === 1 || code === 2) {
+    return { emoji: "🌤️", label: "Partly cloudy" };
+  }
+
+  if (code === 3) {
+    return { emoji: "☁️", label: "Cloudy" };
+  }
+
+  if (code === 45 || code === 48) {
+    return { emoji: "🌫️", label: "Fog" };
+  }
+
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+    return { emoji: "🌦️", label: "Rain" };
+  }
+
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
+    return { emoji: "🌨️", label: "Snow" };
+  }
+
+  if (code >= 95 && code <= 99) {
+    return { emoji: "⛈️", label: "Thunderstorm" };
+  }
+
+  return null;
+}
+
+function getExtremeActivityTemperatureContext(temperatureC) {
+  const temperature = toOptionalNumber(temperatureC);
+
+  if (temperature === null) {
+    return null;
+  }
+
+  if (temperature >= 38) {
+    return { emoji: "🔥", label: "Very hot" };
+  }
+
+  if (temperature <= -10) {
+    return { emoji: "🥶", label: "Very cold" };
+  }
+
+  return null;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, toNumber(ms))));
+}
+
+function renderDailyActivityBlocks(timestamps) {
+  return getDailyActivityBucketStates(timestamps)
+    .map((isActive) => (isActive ? ACTIVITY_BAR_ACTIVE_BLOCK : ACTIVITY_BAR_EMPTY_BLOCK))
+    .join("");
+}
+
+function renderQuietDailyActivityBlocks(timestamps) {
+  return getDailyActivityBucketStates(timestamps)
+    .map((isActive) => (isActive ? ACTIVITY_BAR_QUIET_ACTIVE_BLOCK : ACTIVITY_BAR_QUIET_EMPTY_BLOCK))
+    .join("");
+}
+
+function getDailyActivityBucketStates(timestamps) {
+  const activeBuckets = new Array(DAILY_ACTIVITY_BUCKETS.length).fill(false);
+
+  for (const timestamp of normalizeActivityTimestamps(timestamps)) {
+    const bucketIndex = getDailyActivityBucketIndex(timestamp);
+    if (bucketIndex >= 0) {
+      activeBuckets[bucketIndex] = true;
+    }
+  }
+
+  return activeBuckets;
+}
+
+function collectGitSheetActivityTimestamps(gitSheet) {
+  const sheet = gitSheet && typeof gitSheet === "object" ? gitSheet : {};
+  const timestamps = [];
+  appendActivityTimestampValues(timestamps, sheet.activityTimestamps);
+
+  const repos = Array.isArray(sheet.repos) ? sheet.repos : [];
+  for (const repo of repos) {
+    appendActivityTimestampValues(timestamps, repo && repo.activityTimestamps);
+    appendActivityTimestampValues(timestamps, repo && repo.commitTimestamps);
+    appendActivityTimestampValues(timestamps, repo && repo.commits);
+    appendActivityTimestampValues(timestamps, repo && repo.commitsTodayDetails);
+  }
+
+  return timestamps;
+}
+
+function appendActivityTimestampValues(target, value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      appendActivityTimestampValues(target, item);
+    }
+    return;
+  }
+
+  const timestamp = normalizeActivityTimestamp(value);
+  if (timestamp) {
+    target.push(timestamp);
+  }
+}
+
+function normalizeActivityTimestamps(value) {
+  const timestamps = [];
+  appendActivityTimestampValues(timestamps, value);
+  return timestamps;
+}
+
+function normalizeActivityTimestamp(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value === "object") {
+    return normalizeActivityTimestamp(value.timestamp || value.date || value.committedAt || value.authorDate || value.committerDate);
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getDailyActivityBucketIndex(timestamp) {
+  const hour = timestamp.getHours();
+
+  for (let index = 0; index < DAILY_ACTIVITY_BUCKETS.length; index += 1) {
+    const bucket = DAILY_ACTIVITY_BUCKETS[index];
+    if (hour >= bucket.startHour && hour < bucket.endHour) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getRecentActivityEntries(todayGitSheet, recentGitSheets, dayCount = 7) {
+  const count = normalizeRecentActivityDayCount(dayCount);
+
+  if (Array.isArray(recentGitSheets) && recentGitSheets.length > 0) {
+    return recentGitSheets.slice(-count);
+  }
+
+  const todayDate = getGitSheetActivityDate(todayGitSheet);
+  const todayStamp = formatScalar(todayGitSheet && todayGitSheet.date) || formatLocalDateStamp(todayDate);
+
+  return getRecentLocalDateInfos(count, todayDate).map((dateInfo) =>
+    Object.assign({}, dateInfo, {
+      gitSheet: dateInfo.dateStamp === todayStamp ? todayGitSheet : null,
+    })
+  );
+}
+
+function normalizeRecentActivityDayCount(value) {
+  return Math.max(1, Math.floor(toNumber(value)) || 7);
+}
+
+function getRecentActivityDayCount(settings = {}) {
+  if (settings.showDailyActivityBar === false) {
+    return 0;
+  }
+
+  let dayCount = 0;
+
+  if (settings.showThreeDayActivity === true) {
+    dayCount = Math.max(dayCount, 3);
+  }
+
+  if (settings.showSevenDayActivity === true) {
+    dayCount = Math.max(dayCount, 7);
+  }
+
+  return dayCount;
+}
+
+function getGitSheetActivityDate(gitSheet) {
+  return parseLocalDateStamp(gitSheet && gitSheet.date) || new Date();
+}
+
+function getApproximateMoonPhaseEmoji(date = new Date()) {
+  try {
+    const timestampMs = date instanceof Date ? date.getTime() : new Date(date).getTime();
+    if (!Number.isFinite(timestampMs)) {
+      return "";
+    }
+
+    const daysSinceKnownNewMoon = (timestampMs - KNOWN_NEW_MOON_UTC_MS) / 86400000;
+    const cyclePosition = ((daysSinceKnownNewMoon % LUNAR_CYCLE_DAYS) + LUNAR_CYCLE_DAYS) % LUNAR_CYCLE_DAYS;
+    const phaseIndex = Math.floor(((cyclePosition / LUNAR_CYCLE_DAYS) * MOON_PHASE_EMOJIS.length) + 0.5) % MOON_PHASE_EMOJIS.length;
+    return MOON_PHASE_EMOJIS[phaseIndex] || "";
+  } catch (error) {
+    return "";
+  }
 }
 
 function formatScanMetadataLines(gitSheet) {
@@ -1671,6 +2263,7 @@ async function scanLocalGitRepo(configuredPath, dateStamp, options) {
       hasCommits,
       touchedToday: commitsToday.length > 0,
       commitsToday: commitsToday.length,
+      activityTimestamps: commitsToday.map((commit) => commit.timestamp).filter(Boolean),
       dirty,
       unpushedCommits,
       behindUpstream,
@@ -1704,7 +2297,7 @@ async function readGitCommitsForDate(repoPath, dateStamp, options) {
     "log",
     `--since=${dateStamp}T00:00:00`,
     `--until=${dateStamp}T23:59:59`,
-    "--format=%H%x1f%h%x1f%s",
+    "--format=%H%x1f%h%x1f%cI%x1f%s",
   ], options);
 
   return parseGitCommitLines(output);
@@ -1728,13 +2321,28 @@ function parseGitCommitLines(output) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [hash, shortHash, ...messageParts] = line.split("\x1f");
-      return {
+      const parts = line.split("\x1f");
+      const hash = parts[0] || "";
+      const shortHash = parts[1] || "";
+      const maybeTimestamp = parts[2] || "";
+      const hasTimestamp = parts.length >= 4 && isGitIsoTimestamp(maybeTimestamp);
+      const messageParts = hasTimestamp ? parts.slice(3) : parts.slice(2);
+      const commit = {
         hash: hash || "",
         shortHash: shortHash || "",
         message: messageParts.join(" ").trim(),
       };
+
+      if (hasTimestamp) {
+        commit.timestamp = maybeTimestamp;
+      }
+
+      return commit;
     });
+}
+
+function isGitIsoTimestamp(value) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(formatScalar(value));
 }
 
 function summarizeRepos(repos, scannedCount) {
@@ -2263,6 +2871,52 @@ function normalizeRenderSettings(settingsOrHeading) {
   return Object.assign({}, DEFAULT_SETTINGS, settingsOrHeading || {});
 }
 
+function getRecentLocalDateInfos(dayCount = 7, endDate = new Date()) {
+  const count = Math.max(1, Math.floor(toNumber(dayCount)) || 7);
+  const end = endDate instanceof Date && Number.isFinite(endDate.getTime()) ? endDate : new Date();
+  const todayStamp = formatLocalDateStamp(new Date());
+  const dates = [];
+
+  for (let offset = count - 1; offset >= 0; offset -= 1) {
+    const date = new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset, 12, 0, 0, 0);
+    const dateStamp = formatLocalDateStamp(date);
+    dates.push({
+      date,
+      dateStamp,
+      label: dateStamp === todayStamp ? "Today" : formatShortWeekday(date),
+    });
+  }
+
+  return dates;
+}
+
+function formatLocalDateStamp(date) {
+  const value = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date();
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function parseLocalDateStamp(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(formatScalar(value));
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(year, month, day, 12, 0, 0, 0);
+
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function formatShortWeekday(date) {
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()] || "";
+}
+
 function normalizeTableFormat(value) {
   return ["compact", "standard", "detailed", "emoji-board"].includes(value) ? value : DEFAULT_SETTINGS.tableFormat;
 }
@@ -2282,6 +2936,10 @@ function normalizeTidyView(value) {
 function sanitizeTextSetting(value, fallback) {
   const text = formatScalar(value);
   return text || fallback;
+}
+
+function sanitizeCoordinateSetting(value) {
+  return formatScalar(value).trim();
 }
 
 function formatTitle(value, fallback, useEmoji) {
@@ -2315,6 +2973,15 @@ function formatNumber(value) {
 function toNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
+}
+
+function toOptionalNumber(value) {
+  if (value === null || typeof value === "undefined" || (typeof value === "string" && value.trim() === "")) {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function formatRepoTableHeader(useEmoji, tableFormat) {

@@ -1168,6 +1168,8 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
   lines.push(...formatScanMetadataLines(gitSheet));
 
+  blocks.push(renderActivitySectionLines(gitSheet));
+
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
     if (sectionId === "gitScoreboard" && showSummary) {
       blocks.push(renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle));
@@ -1212,6 +1214,10 @@ function renderDailyActivityBar(timestamps, label = "Today") {
 
 function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today") {
   return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label);
+}
+
+function renderActivitySectionLines(gitSheet) {
+  return ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet)];
 }
 
 function renderDailyActivityBlocks(timestamps) {

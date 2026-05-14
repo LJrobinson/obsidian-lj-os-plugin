@@ -30,6 +30,7 @@ const DAILY_ACTIVITY_BUCKETS = [
 ];
 const ACTIVITY_BAR_EMPTY_BLOCK = "░";
 const ACTIVITY_BAR_ACTIVE_BLOCK = "█";
+const ACTIVITY_BAR_QUIET_EMPTY_BLOCK = "·";
 const MOON_PHASE_EMOJIS = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
 const LUNAR_CYCLE_DAYS = 29.530588853;
 const KNOWN_NEW_MOON_UTC_MS = Date.UTC(2000, 0, 6, 18, 14);
@@ -1282,6 +1283,12 @@ function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options =
   return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label, options);
 }
 
+function renderSevenDayActivityBarFromGitSheet(gitSheet, label, options = {}) {
+  const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
+  const bookend = moonIcon ? ` ${moonIcon}` : "";
+  return `${padActivityDayLabel(label)}  ${renderQuietDailyActivityBlocks(collectGitSheetActivityTimestamps(gitSheet))}${bookend}`;
+}
+
 function renderActivitySectionLines(gitSheet, options = {}) {
   const showMoonIcon = options.showMoonIcon === true;
   const lines = ["### Activity", "", renderDailyActivityBarFromGitSheet(gitSheet, "Today", {
@@ -1293,7 +1300,7 @@ function renderActivitySectionLines(gitSheet, options = {}) {
     lines.push("", "7-Day");
 
     for (const entry of getSevenDayActivityEntries(gitSheet, options.recentGitSheets)) {
-      lines.push(renderDailyActivityBarFromGitSheet(entry.gitSheet, entry.label, {
+      lines.push(renderSevenDayActivityBarFromGitSheet(entry.gitSheet, entry.label, {
         date: entry.date,
         showMoonIcon,
       }));
@@ -1304,6 +1311,18 @@ function renderActivitySectionLines(gitSheet, options = {}) {
 }
 
 function renderDailyActivityBlocks(timestamps) {
+  return getDailyActivityBucketStates(timestamps)
+    .map((isActive) => (isActive ? ACTIVITY_BAR_ACTIVE_BLOCK : ACTIVITY_BAR_EMPTY_BLOCK))
+    .join("");
+}
+
+function renderQuietDailyActivityBlocks(timestamps) {
+  return getDailyActivityBucketStates(timestamps)
+    .map((isActive) => (isActive ? ACTIVITY_BAR_ACTIVE_BLOCK : ACTIVITY_BAR_QUIET_EMPTY_BLOCK))
+    .join(" ");
+}
+
+function getDailyActivityBucketStates(timestamps) {
   const activeBuckets = new Array(DAILY_ACTIVITY_BUCKETS.length).fill(false);
 
   for (const timestamp of normalizeActivityTimestamps(timestamps)) {
@@ -1313,7 +1332,11 @@ function renderDailyActivityBlocks(timestamps) {
     }
   }
 
-  return activeBuckets.map((isActive) => (isActive ? ACTIVITY_BAR_ACTIVE_BLOCK : ACTIVITY_BAR_EMPTY_BLOCK)).join("");
+  return activeBuckets;
+}
+
+function padActivityDayLabel(label) {
+  return (formatScalar(label) || "Day").padEnd(5, " ");
 }
 
 function collectGitSheetActivityTimestamps(gitSheet) {

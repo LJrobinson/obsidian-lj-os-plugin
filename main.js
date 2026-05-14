@@ -1,6 +1,5 @@
 const { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, requestUrl } = require("obsidian");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
 
@@ -2773,25 +2772,12 @@ function normalizeLocalPath(value) {
   }
 
   text = text.replace(/^["']|["']$/g, "").trim();
-  text = expandHomePath(text);
 
   try {
     return path.resolve(text);
   } catch (error) {
     return text;
   }
-}
-
-function expandHomePath(value) {
-  if (value === "~") {
-    return os.homedir();
-  }
-
-  if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return path.join(os.homedir(), value.slice(2));
-  }
-
-  return value;
 }
 
 function validateLocalDirectory(repoPath) {

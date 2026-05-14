@@ -1607,7 +1607,6 @@ async function scanConfiguredRepositories(configuredPaths, dateStamp, options = 
     date: dateStamp,
     generatedAt: scanCompletedAt,
     source: GIT_SHEET_SOURCE,
-    machine: getLocalMachineName(),
     summary: summarizeRepos(repos, repoPaths.length),
     scanStartedAt,
     scanCompletedAt,
@@ -2224,14 +2223,6 @@ function formatGitError(error) {
   }
 
   return message || "Git command failed.";
-}
-
-function getLocalMachineName() {
-  try {
-    return os.hostname();
-  } catch (error) {
-    return "local-machine";
-  }
 }
 
 function inferRepoName(repoPath) {

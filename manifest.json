@@ -1,6 +1,6 @@
 {
   "id": "lj-os",
-  "name": "LJ OS",
+  "name": "LJ os",
   "version": "1.0.1",
   "minAppVersion": "1.0.0",
   "description": "Standalone local Git activity snapshots for Daily Notes.",

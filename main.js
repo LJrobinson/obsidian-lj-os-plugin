@@ -19,6 +19,17 @@ const DASHBOARD_SECTIONS = [
   { id: "repositoryActivity", label: "Repository Activity" },
   { id: "cleanupChecklist", label: "Cleanup Checklist" },
 ];
+const DAILY_ACTIVITY_BUCKETS = [
+  { startHour: 0, endHour: 3 },
+  { startHour: 3, endHour: 6 },
+  { startHour: 6, endHour: 9 },
+  { startHour: 9, endHour: 12 },
+  { startHour: 12, endHour: 15 },
+  { startHour: 15, endHour: 18 },
+  { startHour: 18, endHour: 24 },
+];
+const ACTIVITY_BAR_EMPTY_BLOCK = "░";
+const ACTIVITY_BAR_ACTIVE_BLOCK = "█";
 const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "node_modules",
   ".obsidian",
@@ -1193,6 +1204,93 @@ function renderMissingGitSheetMarkdown(settingsOrHeading) {
   ];
 
   return lines.join("\n").trimEnd();
+}
+
+function renderDailyActivityBar(timestamps, label = "Today") {
+  return `${formatScalar(label) || "Today"}  ${renderDailyActivityBlocks(timestamps)}`;
+}
+
+function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today") {
+  return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label);
+}
+
+function renderDailyActivityBlocks(timestamps) {
+  const activeBuckets = new Array(DAILY_ACTIVITY_BUCKETS.length).fill(false);
+
+  for (const timestamp of normalizeActivityTimestamps(timestamps)) {
+    const bucketIndex = getDailyActivityBucketIndex(timestamp);
+    if (bucketIndex >= 0) {
+      activeBuckets[bucketIndex] = true;
+    }
+  }
+
+  return activeBuckets.map((isActive) => (isActive ? ACTIVITY_BAR_ACTIVE_BLOCK : ACTIVITY_BAR_EMPTY_BLOCK)).join("");
+}
+
+function collectGitSheetActivityTimestamps(gitSheet) {
+  const sheet = gitSheet && typeof gitSheet === "object" ? gitSheet : {};
+  const timestamps = [];
+  appendActivityTimestampValues(timestamps, sheet.activityTimestamps);
+
+  const repos = Array.isArray(sheet.repos) ? sheet.repos : [];
+  for (const repo of repos) {
+    appendActivityTimestampValues(timestamps, repo && repo.activityTimestamps);
+    appendActivityTimestampValues(timestamps, repo && repo.commitTimestamps);
+    appendActivityTimestampValues(timestamps, repo && repo.commits);
+    appendActivityTimestampValues(timestamps, repo && repo.commitsTodayDetails);
+  }
+
+  return timestamps;
+}
+
+function appendActivityTimestampValues(target, value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      appendActivityTimestampValues(target, item);
+    }
+    return;
+  }
+
+  const timestamp = normalizeActivityTimestamp(value);
+  if (timestamp) {
+    target.push(timestamp);
+  }
+}
+
+function normalizeActivityTimestamps(value) {
+  const timestamps = [];
+  appendActivityTimestampValues(timestamps, value);
+  return timestamps;
+}
+
+function normalizeActivityTimestamp(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value === "object") {
+    return normalizeActivityTimestamp(value.timestamp || value.date || value.committedAt || value.authorDate || value.committerDate);
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getDailyActivityBucketIndex(timestamp) {
+  const hour = timestamp.getHours();
+
+  for (let index = 0; index < DAILY_ACTIVITY_BUCKETS.length; index += 1) {
+    const bucket = DAILY_ACTIVITY_BUCKETS[index];
+    if (hour >= bucket.startHour && hour < bucket.endHour) {
+      return index;
+    }
+  }
+
+  return -1;
 }
 
 function formatScanMetadataLines(gitSheet) {

@@ -7,8 +7,9 @@ repos you track, writes a small JSON snapshot inside your vault, and renders a
 Git Wall in your Daily Note from that cached data.
 
 No login. No API keys. No cloud service. No companion repo. No companion app.
-No required CLI. No analytics. LJ OS reads local Git metadata only and stores
-generated activity data locally.
+No required CLI. No analytics. LJ OS reads local Git metadata and stores
+generated activity data locally. Optional weather context can call Open-Meteo
+only when you enable it and enter coordinates.
 
 ```text
 Scan roots -> Discover repositories -> Tracked repos -> Cached JSON -> Git Wall
@@ -22,13 +23,15 @@ Scan roots -> Discover repositories -> Tracked repos -> Cached JSON -> Git Wall
 - can refresh stale LJ OS views in the background without blocking rendering
 - writes daily JSON snapshots to `LJ OS/stats/YYYY-MM-DD.json` by default
 - inserts or replaces a Daily Note Git Wall from cached JSON only
+- shows an optional Daily Activity Bar with cached 3-day or 7-day activity
+  tables
 - lets you reorder the main generated sections in **Dashboard Layout**
 - keeps manual scanning available as an explicit fallback
 
 ## What It Does Not Do
 
 - does not require a second repository, external app, server, login, or API key
-- does not call GitHub or any remote API
+- does not call GitHub or remote Git hosting APIs
 - does not send analytics, telemetry, repo names, commits, or paths anywhere
 - does not auto-crawl every drive
 - does not rediscover repos during startup, interval, or view-open scans
@@ -58,8 +61,9 @@ Copy the files into your vault:
 ```
 
 Then reload Obsidian plugins and enable **LJ OS** in Community plugins. There
-is no build step, `npm install`, login, API setup, companion app, or companion
-CLI required for normal use.
+is no build step, `npm install`, login, API key, companion app, or companion
+CLI required for normal use. Optional weather context only needs manual
+latitude/longitude coordinates.
 
 ## First-Time Setup
 
@@ -158,6 +162,29 @@ Daily Notes
 The JSON stays in your vault. Plugin settings are stored through Obsidian's
 normal plugin data storage.
 
+## Daily Activity Bar
+
+LJ OS can show a compact daily activity timeline inside the Git Wall:
+
+```text
+Today  ☀️ 🟩⬛🟩🟩🟩🟩🟩 🌘
+```
+
+The center bar shows when Git activity happened during the day. Optional
+weather and moon icons provide lightweight ambient context. The Activity Bar is
+local-first and still works without weather, location, API access, internet, or
+logins.
+
+Weather is optional. If enabled, LJ OS uses manual latitude/longitude settings
+to fetch a current Open-Meteo weather icon with no API key. Missing coordinates,
+offline use, or a failed weather request simply omits the weather icon.
+
+The optional 3-day and 7-day Activity views render compact cached tables using
+the same `⬛` inactive and `🟩` active activity segments. These range views read
+daily JSON files from `LJ OS/stats/YYYY-MM-DD.json`; they do not scan repos,
+fetch historical weather, or backfill old weather data. The 3-day and 7-day
+views are mutually exclusive in settings.
+
 ## Commands
 
 | Command | Purpose |
@@ -181,6 +208,12 @@ normal plugin data storage.
 | Refresh in background when LJ OS view opens | On | Shows cached data immediately, then refreshes stale data quietly in the background. |
 | Dashboard Layout | default order | Reorder generated Git Wall sections with **Move up**, **Move down**, and **Reset layout**. |
 | Use emoji | On | Emoji-forward or plain rendered output. |
+| Show daily activity bar | On | Shows a compact activity timeline as its own Dashboard Layout section. |
+| Show weather icon | Off | Optional weather prefix for the Activity Bar. Uses Open-Meteo with manual coordinates and no API key. Hidden when the Activity Bar is off. |
+| Weather latitude / longitude | empty | Optional decimal coordinates used only for the weather icon. Hidden unless weather icons are enabled. |
+| Show moon phase icon | Off | Optional moon phase suffix for Activity rows. Hidden when the Activity Bar is off. |
+| Show 3-day activity view | Off | Shows a cached 3-day Activity table. Mutually exclusive with the 7-day view. |
+| Show 7-day activity view | Off | Shows a cached 7-day Activity table. Mutually exclusive with the 3-day view. |
 | Show summary section | On | Shows or hides the summary output. |
 | Summary style | `callout` | `callout`, `scoreboard`, or `pit-wall`. |
 | Show repository section | On | Shows or hides repository output. |
@@ -204,9 +237,10 @@ change it after inserting a Git Wall, delete or rename the old heading once.
 
 **Dashboard Layout** controls the order of the main generated sections:
 
-1. Git Scoreboard
-2. Repository Activity
-3. Cleanup Checklist
+1. Activity Bar
+2. Git Scoreboard
+3. Repository Activity
+4. Cleanup Checklist
 
 Use **Move up** and **Move down** to change the output order. Use **Reset
 layout** to restore the default order. This affects generated Git Wall / Daily
@@ -221,6 +255,18 @@ or section content.
 Generated: May 13, 2026, 9:00 PM PDT
 Last scan: May 13, 2026, 9:00 PM PDT
 Scan details: duration 2.5s · trigger interval
+
+### Activity
+
+Today  ☀️ 🟩⬛🟩🟩🟩🟩🟩 🌘
+
+3-Day
+
+| Day | Weather | Activity | Moon |
+| :---: | :---: | :---: | :---: |
+| Tue |  | ⬛⬛⬛⬛⬛⬛⬛ | 🌖 |
+| Wed |  | ⬛⬛⬛⬛⬛⬛⬛ | 🌗 |
+| Today | ☀️ | 🟩⬛🟩🟩🟩🟩🟩 | 🌘 |
 
 > [!summary] 🏁 Git Wall
 > 🧭 Scanned: **3** repos
@@ -272,6 +318,12 @@ can inspect it or back it up with your vault.
   "failedRepoCount": 0,
   "timedOut": false,
   "scanTrigger": "interval",
+  "activityWeather": {
+    "emoji": "☀️",
+    "label": "Clear",
+    "source": "open-meteo",
+    "fetchedAt": "2026-05-13T21:00:03.000Z"
+  },
   "warnings": [],
   "repos": [
     {
@@ -330,7 +382,7 @@ LJ OS itself:
 
 - requires no login
 - requires no API keys
-- uses no APIs or remote services
+- uses no required APIs or remote services
 - uses no cloud service
 - sends no analytics or telemetry
 - is not spyware
@@ -343,6 +395,9 @@ LJ OS itself:
 
 Git may contact remotes only when you use Git outside LJ OS. LJ OS scans local
 metadata and local command output; it does not call remote Git hosting APIs.
+If you enable the optional weather icon and enter coordinates, LJ OS can call
+Open-Meteo for weather context. That weather call requires no API key and is
+not needed for the Activity Bar to work.
 
 ## Desktop-Only
 

@@ -31,8 +31,8 @@ const DAILY_ACTIVITY_BUCKETS = [
   { startHour: 15, endHour: 18 },
   { startHour: 18, endHour: 24 },
 ];
-const ACTIVITY_BAR_EMPTY_BLOCK = "░";
-const ACTIVITY_BAR_ACTIVE_BLOCK = "█";
+const ACTIVITY_BAR_EMPTY_BLOCK = "⬛";
+const ACTIVITY_BAR_ACTIVE_BLOCK = "🟩";
 const ACTIVITY_BAR_QUIET_EMPTY_BLOCK = "⬛";
 const ACTIVITY_BAR_QUIET_ACTIVE_BLOCK = "🟩";
 const MOON_PHASE_EMOJIS = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];

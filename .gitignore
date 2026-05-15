@@ -1,0 +1,16 @@
+node_modules/
+main.js.map
+*.map
+
+# Obsidian/plugin dev runtime junk
+.hotreload
+data.json
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# LJ Stuff
+screenshots/

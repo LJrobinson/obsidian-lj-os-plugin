@@ -2085,7 +2085,7 @@ function renderQuietDailyActivityBlocks(timestamps: unknown): string {
 }
 
 function getDailyActivityBucketStates(timestamps: unknown): boolean[] {
-  const activeBuckets = new Array(DAILY_ACTIVITY_BUCKETS.length).fill(false);
+  const activeBuckets = new Array<boolean>(DAILY_ACTIVITY_BUCKETS.length).fill(false);
 
   for (const timestamp of normalizeActivityTimestamps(timestamps)) {
     const bucketIndex = getDailyActivityBucketIndex(timestamp);

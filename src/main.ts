@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, activeDocument, normalizePath, requestUrl } from "obsidian";
+import type { Vault } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
 import { execFile } from "child_process";
@@ -170,6 +171,121 @@ interface GitSheetMetadata {
   warnings: unknown[];
 }
 
+type GitWallNote = string | number | boolean | null | UnknownRecord;
+type ActivityWeatherIcon = string;
+
+interface ActivityWeather {
+  emoji?: string;
+  label?: string;
+  source?: string;
+  fetchedAt?: string;
+}
+
+interface GitWallCommit {
+  hash?: string;
+  shortHash?: string;
+  abbreviatedHash?: string;
+  sha?: string;
+  id?: string;
+  subject?: string;
+  message?: string;
+  title?: string;
+  summary?: string;
+  timestamp?: string;
+}
+
+interface GitWallSummary {
+  reposScanned?: number;
+  reposIncluded?: number;
+  reposTouchedToday?: number;
+  commitsToday?: number;
+  dirtyRepos?: number;
+  unpushedCommits?: number;
+  behindCommits?: number;
+}
+
+interface GitWallRepo {
+  name?: string;
+  path?: string;
+  branch?: string;
+  hasCommits?: boolean;
+  touchedToday?: boolean;
+  commitsToday?: number;
+  activityTimestamps?: unknown[];
+  commitTimestamps?: unknown[];
+  commits?: unknown[];
+  commitsTodayDetails?: unknown[];
+  dirty?: boolean;
+  unpushedCommits?: number;
+  behindUpstream?: number;
+  latestCommit?: GitWallCommit | null;
+  notes?: GitWallNote[] | UnknownRecord | string;
+}
+
+interface RecentGitSheet {
+  date: Date;
+  dateStamp: string;
+  label: string;
+  gitSheet?: GitWallSnapshot | null;
+}
+
+interface GitWallSnapshot {
+  schemaVersion?: string;
+  date?: string;
+  generatedAt?: string;
+  source?: string;
+  summary?: GitWallSummary;
+  activityWeather?: ActivityWeather;
+  activityTimestamps?: unknown[];
+  scanStartedAt?: string;
+  scanCompletedAt?: string;
+  durationMs?: number;
+  repoCount?: number;
+  scannedRepoCount?: number;
+  skippedRepoCount?: number;
+  failedRepoCount?: number;
+  timedOut?: boolean;
+  scanTrigger?: string;
+  warnings?: string[];
+  repos?: GitWallRepo[];
+  notes?: GitWallNote[] | UnknownRecord | string;
+}
+
+interface GitCommandError extends Error {
+  code?: string | number;
+  stdout?: string;
+  stderr?: string;
+  gitArgs?: string[];
+  killed?: boolean;
+  isGitTimeout?: boolean;
+}
+
+interface ScanLocalGitRepoResult {
+  repo?: GitWallRepo;
+  note?: string;
+  skipped?: boolean;
+  failed?: boolean;
+}
+
+interface SectionRange {
+  start: number;
+  end: number;
+}
+
+interface DailyActivityOptions extends UnknownRecord {
+  showWeatherIcon?: boolean;
+  weatherIcon?: ActivityWeatherIcon | null;
+  showMoonIcon?: boolean;
+  date?: Date;
+}
+
+interface ActivitySectionOptions extends DailyActivityOptions {
+  recentGitSheets?: RecentGitSheet[];
+  showThreeDayActivity?: boolean;
+  showSevenDayActivity?: boolean;
+  dayCount?: number;
+}
+
 interface PathTextareaOptions {
   label: string;
   description: string;
@@ -222,6 +338,84 @@ function toRecord(value: unknown): UnknownRecord {
   return isRecord(value) ? value : {};
 }
 
+function asString(value: unknown, fallback = ""): string {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? fallback : value.toISOString();
+  }
+
+  try {
+    return JSON.stringify(value) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function asDate(value: unknown): Date | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const date = typeof value === "number" ? new Date(value) : new Date(asString(value));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function asGitWallSnapshot(value: unknown): GitWallSnapshot {
+  return isRecord(value) ? (value as GitWallSnapshot) : {};
+}
+
+function asGitWallSummary(value: unknown): GitWallSummary {
+  return isRecord(value) ? (value as GitWallSummary) : {};
+}
+
+function asGitWallRepo(value: unknown): GitWallRepo {
+  return isRecord(value) ? (value as GitWallRepo) : {};
+}
+
+function asGitWallCommit(value: unknown): GitWallCommit | null {
+  return isRecord(value) ? (value as GitWallCommit) : null;
+}
+
+function asGitCommandError(error: unknown): GitCommandError {
+  if (error instanceof Error) {
+    return error as GitCommandError;
+  }
+
+  const record = toRecord(error);
+  const fallback = new Error(formatScalar(record.message) || asString(error, "Git command failed.")) as GitCommandError;
+  fallback.code = typeof record.code === "string" || typeof record.code === "number" ? record.code : undefined;
+  fallback.stdout = formatScalar(record.stdout);
+  fallback.stderr = formatScalar(record.stderr);
+  fallback.killed = record.killed === true;
+  fallback.isGitTimeout = record.isGitTimeout === true;
+  fallback.gitArgs = asArray<string>(record.gitArgs).map(formatScalar);
+  return fallback;
+}
+
 function coerceSettings(savedSettings: UnknownRecord): LjOsSettings {
   const settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings) as LjOsSettings;
 
@@ -253,6 +447,51 @@ function coerceSettings(savedSettings: UnknownRecord): LjOsSettings {
 
 function runAsync(action: () => PromiseLike<unknown>): void {
   void Promise.resolve(action()).catch((error: unknown) => console.error("LJ OS async action failed", error));
+}
+
+function createDomElement<K extends keyof HTMLElementTagNameMap>(tagName: K): HTMLElementTagNameMap[K] {
+  return (activeDocument as Document).createElement(tagName);
+}
+
+function setElementText(element: HTMLElement, text: unknown): void {
+  element.textContent = asString(text);
+}
+
+function appendDomChild(parent: Node, child: Node): void {
+  parent.appendChild(child);
+}
+
+function addDomClass(element: HTMLElement, className: string): void {
+  element.addClass(className);
+}
+
+function addDomClasses(element: HTMLElement, classNames: string[]): void {
+  for (const className of classNames) {
+    addDomClass(element, className);
+  }
+}
+
+function configureTextarea(textarea: HTMLTextAreaElement, options: PathTextareaOptions): void {
+  textarea.rows = options.rows;
+  textarea.placeholder = options.placeholder;
+  textarea.value = options.value;
+}
+
+function getTextareaValue(textarea: HTMLTextAreaElement): string {
+  return textarea.value;
+}
+
+function onDomEvent(element: HTMLElement, eventName: keyof HTMLElementEventMap, listener: (event: Event) => void): void {
+  element.addEventListener(eventName, listener);
+}
+
+function configureButton(button: HTMLButtonElement, label: string, isPrimary: boolean): void {
+  button.type = "button";
+  setElementText(button, label);
+
+  if (isPrimary) {
+    addDomClass(button, "mod-cta");
+  }
 }
 
 export default class LjOsPlugin extends Plugin {
@@ -420,7 +659,7 @@ export default class LjOsPlugin extends Plugin {
     }
   }
 
-  async writeGitSheet(gitSheet) {
+  async writeGitSheet(gitSheet: GitWallSnapshot) {
     const gitSheetPath = this.getTodaysGitSheetPath();
     const gitSheetFolder = getFolderPart(gitSheetPath);
 
@@ -490,11 +729,11 @@ export default class LjOsPlugin extends Plugin {
     new Notice(gitSheet ? "Inserted cached LJ OS Git Wall data." : "Inserted LJ OS Git Wall fallback. No scan data found for today.");
   }
 
-  async readTodaysGitSheet() {
+  async readTodaysGitSheet(): Promise<GitWallSnapshot | null> {
     return this.readGitSheetForDate(this.getTodayStamp());
   }
 
-  async readGitSheetForDate(dateStamp: unknown): Promise<UnknownRecord | null> {
+  async readGitSheetForDate(dateStamp: unknown): Promise<GitWallSnapshot | null> {
     const gitSheetPath = this.getGitSheetPathForDate(dateStamp);
     const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
 
@@ -504,16 +743,16 @@ export default class LjOsPlugin extends Plugin {
 
     try {
       const gitSheet: unknown = JSON.parse(await this.app.vault.read(gitSheetFile));
-      return isRecord(gitSheet) ? gitSheet : null;
+      return isRecord(gitSheet) ? asGitWallSnapshot(gitSheet) : null;
     } catch (error) {
       console.error("Failed to parse existing LJ OS Git Wall JSON", error);
       return null;
     }
   }
 
-  async readRecentGitSheets(dayCount = 7) {
+  async readRecentGitSheets(dayCount = 7): Promise<RecentGitSheet[]> {
     const dateInfos = getRecentLocalDateInfos(dayCount);
-    const entries = [];
+    const entries: RecentGitSheet[] = [];
 
     for (const dateInfo of dateInfos) {
       entries.push(Object.assign({}, dateInfo, { gitSheet: await this.readGitSheetForDate(dateInfo.dateStamp) }));
@@ -522,11 +761,7 @@ export default class LjOsPlugin extends Plugin {
     return entries;
   }
 
-  async addActivityWeatherToGitSheet(gitSheet: unknown) {
-    if (!isRecord(gitSheet)) {
-      return;
-    }
-
+  async addActivityWeatherToGitSheet(gitSheet: GitWallSnapshot) {
     try {
       const activityWeather = await this.resolveActivityWeatherContext();
       if (activityWeather) {
@@ -695,12 +930,12 @@ export default class LjOsPlugin extends Plugin {
       return true;
     }
 
-    const lastSuccessfulMs = Date.parse(lastSuccessfulAt);
-    if (!Number.isFinite(lastSuccessfulMs)) {
+    const lastSuccessfulDate = asDate(lastSuccessfulAt);
+    if (!lastSuccessfulDate) {
       return true;
     }
 
-    return Date.now() - lastSuccessfulMs >= this.getFreshnessThresholdMs();
+    return Date.now() - lastSuccessfulDate.getTime() >= this.getFreshnessThresholdMs();
   }
 
   getFreshnessThresholdMs() {
@@ -712,18 +947,19 @@ export default class LjOsPlugin extends Plugin {
 
   wasScanCompletedRecently(thresholdMs: number): boolean {
     const completedAt = this.scanState.lastScanCompletedAt;
-    const completedMs = Date.parse(completedAt || "");
-    return Number.isFinite(completedMs) && Date.now() - completedMs < thresholdMs;
+    const completedDate = asDate(completedAt);
+    return !!completedDate && Date.now() - completedDate.getTime() < thresholdMs;
   }
 
   completeScanState(gitSheet: unknown, startedAtMs: number) {
     const metadata = getGitSheetMetadata(gitSheet);
     const status = formatCompletedScanStatus(metadata);
+    const completedAt = metadata.scanCompletedAt || new Date().toISOString();
 
     this.updateScanState({
       isScanRunning: false,
-      lastScanCompletedAt: metadata.scanCompletedAt || new Date().toISOString(),
-      lastSuccessfulScanCompletedAt: metadata.scanCompletedAt || new Date().toISOString(),
+      lastScanCompletedAt: completedAt,
+      lastSuccessfulScanCompletedAt: completedAt,
       lastScanDurationMs: metadata.durationMs || Date.now() - startedAtMs,
       lastScanTrigger: metadata.scanTrigger,
       lastRepoCount: metadata.repoCount,
@@ -1269,14 +1505,14 @@ class LjOsSettingTab extends PluginSettingTab {
 function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots: string[], trackedRepoPaths: string[]) {
   const hasTrackedRepos = trackedRepoPaths.length > 0;
   const panel = createCompactPanel(containerEl, hasTrackedRepos ? "Setup Complete ☑️" : "Git Started");
-  const copy = activeDocument.createElement("p");
-  copy.textContent = hasTrackedRepos
+  const copy = createDomElement("p");
+  setElementText(copy, hasTrackedRepos
     ? `LJ OS is tracking ${trackedRepoPaths.length} repos. It will keep cached Git Wall data fresh in the background.`
-    : "Point LJ OS at the folders or drives where your Git repos live. LJ OS will discover repos, track the ones you enable, then keep your Git Wall updated automatically.";
-  panel.appendChild(copy);
+    : "Point LJ OS at the folders or drives where your Git repos live. LJ OS will discover repos, track the ones you enable, then keep your Git Wall updated automatically.");
+  appendDomChild(panel, copy);
 
   if (!hasTrackedRepos) {
-    const steps = activeDocument.createElement("ol");
+    const steps = createDomElement("ol");
     for (const step of [
       "Add scan roots or exact repo paths.",
       "Discover repositories.",
@@ -1284,60 +1520,56 @@ function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots
       "Enable automation.",
       "Run first scan.",
     ]) {
-      const item = activeDocument.createElement("li");
-      item.textContent = step;
-      steps.appendChild(item);
+      const item = createDomElement("li");
+      setElementText(item, step);
+      appendDomChild(steps, item);
     }
-    panel.appendChild(steps);
+    appendDomChild(panel, steps);
   }
 
-  const hint = activeDocument.createElement("p");
-  hint.textContent = "Fastest setup: add your main repo folder or drive, click Discover repositories, then click Scan now.";
-  hint.addClass("lj-os-settings-no-margin-bottom");
-  panel.appendChild(hint);
+  const hint = createDomElement("p");
+  setElementText(hint, "Fastest setup: add your main repo folder or drive, click Discover repositories, then click Scan now.");
+  addDomClass(hint, "lj-os-settings-no-margin-bottom");
+  appendDomChild(panel, hint);
 
-  const actions = activeDocument.createElement("div");
-  actions.addClass("lj-os-settings-actions");
-  panel.appendChild(actions);
+  const actions = createDomElement("div");
+  addDomClass(actions, "lj-os-settings-actions");
+  appendDomChild(panel, actions);
 
-  actions.appendChild(createActionButton("Discover repositories", () => plugin.discoverRepositories({ showNotice: true }), true));
+  appendDomChild(actions, createActionButton("Discover repositories", () => plugin.discoverRepositories({ showNotice: true }), true));
 
   if (hasTrackedRepos) {
-    actions.appendChild(createActionButton("Scan now", () => plugin.scanTodaysGitSheet({ trigger: "manual", showNotice: true }), false));
+    appendDomChild(actions, createActionButton("Scan now", () => plugin.scanTodaysGitSheet({ trigger: "manual", showNotice: true }), false));
   }
 
   if (scanRoots.length > 0 || trackedRepoPaths.length > 0) {
-    const counts = activeDocument.createElement("p");
-    counts.textContent = `${scanRoots.length} scan roots · ${trackedRepoPaths.length} tracked repos`;
-    counts.addClass("lj-os-settings-muted");
-    counts.addClass("lj-os-settings-counts");
-    panel.appendChild(counts);
+    const counts = createDomElement("p");
+    setElementText(counts, `${scanRoots.length} scan roots · ${trackedRepoPaths.length} tracked repos`);
+    addDomClasses(counts, ["lj-os-settings-muted", "lj-os-settings-counts"]);
+    appendDomChild(panel, counts);
   }
 }
 
 function renderFullWidthPathTextareaSetting(containerEl: HTMLElement, options: PathTextareaOptions) {
   const panel = createCompactPanel(containerEl, options.label);
-  const description = activeDocument.createElement("div");
-  description.textContent = options.description;
-  description.addClass("lj-os-settings-muted");
-  description.addClass("lj-os-settings-description");
-  panel.appendChild(description);
+  const description = createDomElement("div");
+  setElementText(description, options.description);
+  addDomClasses(description, ["lj-os-settings-muted", "lj-os-settings-description"]);
+  appendDomChild(panel, description);
 
-  const textarea = activeDocument.createElement("textarea");
-  textarea.rows = options.rows;
-  textarea.placeholder = options.placeholder;
-  textarea.value = options.value;
-  textarea.addClass("lj-os-settings-textarea");
-  textarea.addEventListener("change", () => {
-    runAsync(() => options.onChange(textarea.value));
+  const textarea = createDomElement("textarea");
+  configureTextarea(textarea, options);
+  addDomClass(textarea, "lj-os-settings-textarea");
+  onDomEvent(textarea, "change", () => {
+    runAsync(() => options.onChange(getTextareaValue(textarea)));
   });
-  panel.appendChild(textarea);
+  appendDomChild(panel, textarea);
 }
 
 function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, trackedRepoPaths: string[]) {
   const state = plugin.scanState;
   const panel = createCompactPanel(containerEl, "Scan Status");
-  const primary = activeDocument.createElement("p");
+  const primary = createDomElement("p");
   const lastScan = formatTimestampForSettings(state.lastSuccessfulScanCompletedAt || state.lastScanCompletedAt);
   const duration = formatScanStateDuration(state);
   const status = formatScanStatusLabel(state.lastScanStatus);
@@ -1351,11 +1583,11 @@ function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, t
     pieces.push(`Last scan: ${lastScan}`);
   }
 
-  primary.textContent = pieces.join(" · ");
-  primary.addClass("lj-os-settings-primary-status");
-  panel.appendChild(primary);
+  setElementText(primary, pieces.join(" · "));
+  addDomClass(primary, "lj-os-settings-primary-status");
+  appendDomChild(panel, primary);
 
-  const secondary = activeDocument.createElement("p");
+  const secondary = createDomElement("p");
   const failedCount = toNumber(state.lastFailedRepoCount);
   const skippedCount = toNumber(state.lastSkippedRepoCount);
   const trigger = formatScalar(state.lastScanTrigger);
@@ -1370,32 +1602,32 @@ function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, t
     secondaryPieces.push("Timed out");
   }
 
-  secondary.textContent = secondaryPieces.join(" · ");
-  secondary.addClass("lj-os-settings-secondary-status");
-  panel.appendChild(secondary);
+  setElementText(secondary, secondaryPieces.join(" · "));
+  addDomClass(secondary, "lj-os-settings-secondary-status");
+  appendDomChild(panel, secondary);
 }
 
 function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) {
   const order = normalizeSectionOrder(plugin.settings.sectionOrder);
   const panel = createCompactPanel(containerEl, "Section order");
-  const list = activeDocument.createElement("div");
-  list.addClass("lj-os-settings-list");
-  panel.appendChild(list);
+  const list = createDomElement("div");
+  addDomClass(list, "lj-os-settings-list");
+  appendDomChild(panel, list);
 
   order.forEach((sectionId, index) => {
     const section = getDashboardSection(sectionId);
-    const row = activeDocument.createElement("div");
-    row.addClass("lj-os-settings-row");
-    list.appendChild(row);
+    const row = createDomElement("div");
+    addDomClass(row, "lj-os-settings-row");
+    appendDomChild(list, row);
 
-    const label = activeDocument.createElement("div");
-    label.textContent = `${index + 1}. ${section.label}`;
-    label.addClass("lj-os-settings-row-label");
-    row.appendChild(label);
+    const label = createDomElement("div");
+    setElementText(label, `${index + 1}. ${section.label}`);
+    addDomClass(label, "lj-os-settings-row-label");
+    appendDomChild(row, label);
 
-    const actions = activeDocument.createElement("div");
-    actions.addClass("lj-os-settings-row-actions");
-    row.appendChild(actions);
+    const actions = createDomElement("div");
+    addDomClass(actions, "lj-os-settings-row-actions");
+    appendDomChild(row, actions);
 
     const moveUpButton = createActionButton(
       "Move up",
@@ -1407,7 +1639,7 @@ function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) 
       index > 0
     );
     moveUpButton.disabled = index === 0;
-    actions.appendChild(moveUpButton);
+    appendDomChild(actions, moveUpButton);
 
     const moveDownButton = createActionButton(
       "Move down",
@@ -1419,12 +1651,12 @@ function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) 
       index < order.length - 1
     );
     moveDownButton.disabled = index === order.length - 1;
-    actions.appendChild(moveDownButton);
+    appendDomChild(actions, moveDownButton);
   });
 
-  const resetRow = activeDocument.createElement("div");
-  resetRow.addClass("lj-os-settings-reset-row");
-  resetRow.appendChild(
+  const resetRow = createDomElement("div");
+  addDomClass(resetRow, "lj-os-settings-reset-row");
+  appendDomChild(resetRow,
     createActionButton(
       "Reset layout",
       async () => {
@@ -1435,60 +1667,57 @@ function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) 
       true
     )
   );
-  panel.appendChild(resetRow);
+  appendDomChild(panel, resetRow);
 }
 
 function renderAdvancedScanningDetails(containerEl: HTMLElement) {
   const panel = createCompactPanel(containerEl, "Discovery Details");
-  const details = activeDocument.createElement("p");
-  details.textContent = `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, the vault config folder, Git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`;
-  details.addClass("lj-os-settings-details");
-  panel.appendChild(details);
+  const details = createDomElement("p");
+  setElementText(details, `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, the vault config folder, Git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`);
+  addDomClass(details, "lj-os-settings-details");
+  appendDomChild(panel, details);
 }
 
 function createCompactPanel(containerEl: HTMLElement, title: string): HTMLElement {
-  const panel = activeDocument.createElement("div");
-  panel.addClass("lj-os-settings-card");
+  const panel = createDomElement("div");
+  addDomClass(panel, "lj-os-settings-card");
 
-  const heading = activeDocument.createElement("div");
-  heading.textContent = title;
-  heading.addClass("lj-os-settings-card-heading");
-  panel.appendChild(heading);
-  containerEl.appendChild(panel);
+  const heading = createDomElement("div");
+  setElementText(heading, title);
+  addDomClass(heading, "lj-os-settings-card-heading");
+  appendDomChild(panel, heading);
+  appendDomChild(containerEl, panel);
   return panel;
 }
 
 function createActionButton(label: string, onClick: AsyncAction, isPrimary: boolean): HTMLButtonElement {
-  const button = activeDocument.createElement("button");
-  button.type = "button";
-  button.textContent = label;
-  if (isPrimary) {
-    button.classList.add("mod-cta");
-  }
-  button.addEventListener("click", () => {
+  const button = createDomElement("button");
+  configureButton(button, label, isPrimary);
+  onDomEvent(button, "click", () => {
     void Promise.resolve(onClick()).catch((error) => console.error("LJ OS action failed", error));
   });
   return button;
 }
 
-function getDashboardSection(sectionId) {
-  return DASHBOARD_SECTIONS.find((section) => section.id === sectionId) || { id: sectionId, label: sectionId };
+function getDashboardSection(sectionId: unknown): { id: DashboardSectionId; label: string } {
+  const normalizedId = normalizeSectionOrder([sectionId])[0];
+  return DASHBOARD_SECTIONS.find((section) => section.id === normalizedId) || { id: normalizedId, label: normalizedId };
 }
 
-function normalizeSectionOrder(value) {
+function normalizeSectionOrder(value: unknown): DashboardSectionId[] {
   const rawOrder = Array.isArray(value) ? value : [];
   const knownIds = new Set(DASHBOARD_SECTIONS.map((section) => section.id));
-  const seen = new Set();
-  const order = [];
+  const seen = new Set<DashboardSectionId>();
+  const order: DashboardSectionId[] = [];
 
   for (const rawSectionId of rawOrder) {
     const sectionId = formatScalar(rawSectionId);
-    if (!knownIds.has(sectionId) || seen.has(sectionId)) {
+    if (!knownIds.has(sectionId as DashboardSectionId) || seen.has(sectionId as DashboardSectionId)) {
       continue;
     }
 
-    seen.add(sectionId);
-    order.push(sectionId);
+    seen.add(sectionId as DashboardSectionId);
+    order.push(sectionId as DashboardSectionId);
   }
 
   for (const sectionId of DEFAULT_SECTION_ORDER) {
@@ -1501,7 +1730,7 @@ function normalizeSectionOrder(value) {
   return order;
 }
 
-function moveSectionOrderItem(order, index, direction) {
+function moveSectionOrderItem(order: unknown, index: number, direction: number): DashboardSectionId[] {
   const normalizedOrder = normalizeSectionOrder(order);
   const nextIndex = index + direction;
 
@@ -1515,7 +1744,7 @@ function moveSectionOrderItem(order, index, direction) {
   return movedOrder;
 }
 
-function formatScanStatusLabel(value) {
+function formatScanStatusLabel(value: unknown): string {
   const text = formatScalar(value);
 
   if (!text) {
@@ -1525,14 +1754,15 @@ function formatScanStatusLabel(value) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
+function renderGitSheetMarkdown(gitSheet: unknown, settingsOrHeading: unknown): string {
+  const snapshot = asGitWallSnapshot(gitSheet);
   const renderSettings = normalizeRenderSettings(settingsOrHeading);
   const useEmoji = renderSettings.useEmoji !== false;
-  const summary = gitSheet.summary || {};
-  const repos = Array.isArray(gitSheet.repos) ? gitSheet.repos : [];
+  const summary = asGitWallSummary(snapshot.summary);
+  const repos = asArray<GitWallRepo>(snapshot.repos).map(asGitWallRepo);
   const dirtyRepos = repos.filter((repo) => Boolean(repo.dirty));
   const reposWithNotes = repos.filter((repo) => hasNotes(repo.notes));
-  const sheetNotes = normalizeNotes(gitSheet.notes);
+  const sheetNotes = normalizeNotes(snapshot.notes);
   const summaryTitle = formatTitle(renderSettings.summaryTitle, DEFAULT_SETTINGS.summaryTitle, useEmoji);
   const repoSectionTitle = formatTitle(renderSettings.repoSectionTitle, DEFAULT_SETTINGS.repoSectionTitle, useEmoji);
   const tidySectionTitle = formatTitle(renderSettings.tidySectionTitle, DEFAULT_SETTINGS.tidySectionTitle, useEmoji);
@@ -1553,12 +1783,12 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
 
   lines.push((renderSettings.dailySectionHeading || DEFAULT_SETTINGS.dailySectionHeading).trim());
   lines.push("");
-  lines.push(`Generated: ${formatGeneratedAt(gitSheet.generatedAt)}`);
-  lines.push(...formatScanMetadataLines(gitSheet));
+  lines.push(`Generated: ${formatGeneratedAt(snapshot.generatedAt)}`);
+  lines.push(...formatScanMetadataLines(snapshot));
 
   for (const sectionId of normalizeSectionOrder(renderSettings.sectionOrder)) {
     if (sectionId === "activityBar" && showDailyActivityBar) {
-      blocks.push(renderActivitySectionLines(gitSheet, {
+      blocks.push(renderActivitySectionLines(snapshot, {
         recentGitSheets: renderSettings.recentGitSheets,
         showWeatherIcon: showActivityWeatherIcon,
         weatherIcon: renderSettings.activityWeatherIcon,
@@ -1592,7 +1822,7 @@ function renderGitSheetMarkdown(gitSheet, settingsOrHeading) {
   return lines.join("\n").trimEnd();
 }
 
-function renderMissingGitSheetMarkdown(settingsOrHeading) {
+function renderMissingGitSheetMarkdown(settingsOrHeading: unknown): string {
   const renderSettings = normalizeRenderSettings(settingsOrHeading);
   const lines = [
     (renderSettings.dailySectionHeading || DEFAULT_SETTINGS.dailySectionHeading).trim(),
@@ -1603,7 +1833,7 @@ function renderMissingGitSheetMarkdown(settingsOrHeading) {
   return lines.join("\n").trimEnd();
 }
 
-function renderDailyActivityBar(timestamps, label = "Today", options = {}) {
+function renderDailyActivityBar(timestamps: unknown, label = "Today", options: DailyActivityOptions = {}): string {
   const weatherIcon = getActivityWeatherIcon(options);
   const weatherPrefix = weatherIcon ? `${weatherIcon} ` : "";
   const moonIcon = options.showMoonIcon ? getApproximateMoonPhaseEmoji(options.date || new Date()) : "";
@@ -1611,11 +1841,11 @@ function renderDailyActivityBar(timestamps, label = "Today", options = {}) {
   return `${formatScalar(label) || "Today"}  ${weatherPrefix}${renderDailyActivityBlocks(timestamps)}${bookend}`;
 }
 
-function renderDailyActivityBarFromGitSheet(gitSheet, label = "Today", options = {}) {
+function renderDailyActivityBarFromGitSheet(gitSheet: unknown, label = "Today", options: DailyActivityOptions = {}): string {
   return renderDailyActivityBar(collectGitSheetActivityTimestamps(gitSheet), label, options);
 }
 
-function renderActivitySectionLines(gitSheet, options = {}) {
+function renderActivitySectionLines(gitSheet: unknown, options: ActivitySectionOptions = {}): string[] {
   const showWeatherIcon = options.showWeatherIcon === true;
   const weatherIcon = getActivityWeatherIcon(options);
   const showMoonIcon = options.showMoonIcon === true;
@@ -1647,7 +1877,7 @@ function renderActivitySectionLines(gitSheet, options = {}) {
   return lines;
 }
 
-function renderRecentActivityTableLines(gitSheet, options = {}) {
+function renderRecentActivityTableLines(gitSheet: unknown, options: ActivitySectionOptions = {}): string[] {
   const showWeatherIcon = options.showWeatherIcon === true;
   const showMoonIcon = options.showMoonIcon === true;
   const dayCount = normalizeRecentActivityDayCount(options.dayCount);
@@ -1688,7 +1918,7 @@ function renderRecentActivityTableLines(gitSheet, options = {}) {
   return lines;
 }
 
-function getActivityWeatherIcon(options: UnknownRecord = {}) {
+function getActivityWeatherIcon(options: DailyActivityOptions = {}): ActivityWeatherIcon | null {
   if (options.showWeatherIcon !== true) {
     return null;
   }
@@ -1697,12 +1927,8 @@ function getActivityWeatherIcon(options: UnknownRecord = {}) {
 }
 
 function getCachedActivityWeatherIcon(gitSheet: unknown): string | null {
-  const sheet = toRecord(gitSheet);
+  const sheet = asGitWallSnapshot(gitSheet);
   const activityWeather = toRecord(sheet.activityWeather);
-
-  if (!activityWeather) {
-    return null;
-  }
 
   return formatScalar(activityWeather.emoji) || null;
 }
@@ -1782,7 +2008,7 @@ function buildOpenMeteoActivityWeatherUrl(request: ActivityWeatherRequest): stri
   return `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
 }
 
-function mapOpenMeteoWeatherToActivityContext(weatherCode, temperatureC) {
+function mapOpenMeteoWeatherToActivityContext(weatherCode: unknown, temperatureC: unknown): ActivityWeatherContext | null {
   const extremeTemperature = getExtremeActivityTemperatureContext(temperatureC);
   if (extremeTemperature) {
     return extremeTemperature;
@@ -1824,7 +2050,7 @@ function mapOpenMeteoWeatherToActivityContext(weatherCode, temperatureC) {
   return null;
 }
 
-function getExtremeActivityTemperatureContext(temperatureC) {
+function getExtremeActivityTemperatureContext(temperatureC: unknown): ActivityWeatherContext | null {
   const temperature = toOptionalNumber(temperatureC);
 
   if (temperature === null) {
@@ -1842,23 +2068,23 @@ function getExtremeActivityTemperatureContext(temperatureC) {
   return null;
 }
 
-function delay(ms) {
+function delay(ms: unknown): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, toNumber(ms))));
 }
 
-function renderDailyActivityBlocks(timestamps) {
+function renderDailyActivityBlocks(timestamps: unknown): string {
   return getDailyActivityBucketStates(timestamps)
     .map((isActive) => (isActive ? ACTIVITY_BAR_ACTIVE_BLOCK : ACTIVITY_BAR_EMPTY_BLOCK))
     .join("");
 }
 
-function renderQuietDailyActivityBlocks(timestamps) {
+function renderQuietDailyActivityBlocks(timestamps: unknown): string {
   return getDailyActivityBucketStates(timestamps)
     .map((isActive) => (isActive ? ACTIVITY_BAR_QUIET_ACTIVE_BLOCK : ACTIVITY_BAR_QUIET_EMPTY_BLOCK))
     .join("");
 }
 
-function getDailyActivityBucketStates(timestamps) {
+function getDailyActivityBucketStates(timestamps: unknown): boolean[] {
   const activeBuckets = new Array(DAILY_ACTIVITY_BUCKETS.length).fill(false);
 
   for (const timestamp of normalizeActivityTimestamps(timestamps)) {
@@ -1871,23 +2097,23 @@ function getDailyActivityBucketStates(timestamps) {
   return activeBuckets;
 }
 
-function collectGitSheetActivityTimestamps(gitSheet) {
-  const sheet = gitSheet && typeof gitSheet === "object" ? gitSheet : {};
-  const timestamps = [];
+function collectGitSheetActivityTimestamps(gitSheet: unknown): Date[] {
+  const sheet = asGitWallSnapshot(gitSheet);
+  const timestamps: Date[] = [];
   appendActivityTimestampValues(timestamps, sheet.activityTimestamps);
 
-  const repos = Array.isArray(sheet.repos) ? sheet.repos : [];
+  const repos = asArray<GitWallRepo>(sheet.repos).map(asGitWallRepo);
   for (const repo of repos) {
-    appendActivityTimestampValues(timestamps, repo && repo.activityTimestamps);
-    appendActivityTimestampValues(timestamps, repo && repo.commitTimestamps);
-    appendActivityTimestampValues(timestamps, repo && repo.commits);
-    appendActivityTimestampValues(timestamps, repo && repo.commitsTodayDetails);
+    appendActivityTimestampValues(timestamps, repo.activityTimestamps);
+    appendActivityTimestampValues(timestamps, repo.commitTimestamps);
+    appendActivityTimestampValues(timestamps, repo.commits);
+    appendActivityTimestampValues(timestamps, repo.commitsTodayDetails);
   }
 
   return timestamps;
 }
 
-function appendActivityTimestampValues(target, value) {
+function appendActivityTimestampValues(target: Date[], value: unknown): void {
   if (Array.isArray(value)) {
     for (const item of value) {
       appendActivityTimestampValues(target, item);
@@ -1901,13 +2127,13 @@ function appendActivityTimestampValues(target, value) {
   }
 }
 
-function normalizeActivityTimestamps(value) {
-  const timestamps = [];
+function normalizeActivityTimestamps(value: unknown): Date[] {
+  const timestamps: Date[] = [];
   appendActivityTimestampValues(timestamps, value);
   return timestamps;
 }
 
-function normalizeActivityTimestamp(value) {
+function normalizeActivityTimestamp(value: unknown): Date | null {
   if (!value) {
     return null;
   }
@@ -1917,14 +2143,19 @@ function normalizeActivityTimestamp(value) {
   }
 
   if (typeof value === "object") {
-    return normalizeActivityTimestamp(value.timestamp || value.date || value.committedAt || value.authorDate || value.committerDate);
+    const record = toRecord(value);
+    return normalizeActivityTimestamp(record.timestamp || record.date || record.committedAt || record.authorDate || record.committerDate);
   }
 
-  const date = new Date(value);
+  const date = asDate(value);
+  if (!date) {
+    return null;
+  }
+
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function getDailyActivityBucketIndex(timestamp) {
+function getDailyActivityBucketIndex(timestamp: Date): number {
   const hour = timestamp.getHours();
 
   for (let index = 0; index < DAILY_ACTIVITY_BUCKETS.length; index += 1) {
@@ -1937,28 +2168,39 @@ function getDailyActivityBucketIndex(timestamp) {
   return -1;
 }
 
-function getRecentActivityEntries(todayGitSheet, recentGitSheets, dayCount = 7) {
+function getRecentActivityEntries(todayGitSheet: unknown, recentGitSheets: unknown, dayCount = 7): RecentGitSheet[] {
   const count = normalizeRecentActivityDayCount(dayCount);
 
   if (Array.isArray(recentGitSheets) && recentGitSheets.length > 0) {
-    return recentGitSheets.slice(-count);
+    return recentGitSheets.slice(-count).map((entry) => {
+      const record = toRecord(entry);
+      const date = asDate(record.date) || new Date();
+      const dateStamp = formatScalar(record.dateStamp) || formatLocalDateStamp(date);
+      return {
+        date,
+        dateStamp,
+        label: formatScalar(record.label) || dateStamp,
+        gitSheet: record.gitSheet ? asGitWallSnapshot(record.gitSheet) : null,
+      };
+    });
   }
 
   const todayDate = getGitSheetActivityDate(todayGitSheet);
-  const todayStamp = formatScalar(todayGitSheet && todayGitSheet.date) || formatLocalDateStamp(todayDate);
+  const todaySnapshot = isRecord(todayGitSheet) ? asGitWallSnapshot(todayGitSheet) : null;
+  const todayStamp = formatScalar(todaySnapshot?.date) || formatLocalDateStamp(todayDate);
 
   return getRecentLocalDateInfos(count, todayDate).map((dateInfo) =>
     Object.assign({}, dateInfo, {
-      gitSheet: dateInfo.dateStamp === todayStamp ? todayGitSheet : null,
+      gitSheet: dateInfo.dateStamp === todayStamp ? todaySnapshot : null,
     })
   );
 }
 
-function normalizeRecentActivityDayCount(value) {
+function normalizeRecentActivityDayCount(value: unknown): number {
   return Math.max(1, Math.floor(toNumber(value)) || 7);
 }
 
-function getRecentActivityDayCount(settings = {}) {
+function getRecentActivityDayCount(settings: Partial<LjOsSettings> = {}): number {
   if (settings.showDailyActivityBar === false) {
     return 0;
   }
@@ -1976,17 +2218,18 @@ function getRecentActivityDayCount(settings = {}) {
   return dayCount;
 }
 
-function getGitSheetActivityDate(gitSheet) {
-  return parseLocalDateStamp(gitSheet && gitSheet.date) || new Date();
+function getGitSheetActivityDate(gitSheet: unknown): Date {
+  return parseLocalDateStamp(asGitWallSnapshot(gitSheet).date) || new Date();
 }
 
-function getApproximateMoonPhaseEmoji(date = new Date()) {
+function getApproximateMoonPhaseEmoji(date: unknown = new Date()): string {
   try {
-    const timestampMs = date instanceof Date ? date.getTime() : new Date(date).getTime();
-    if (!Number.isFinite(timestampMs)) {
+    const phaseDate = asDate(date);
+    if (!phaseDate) {
       return "";
     }
 
+    const timestampMs = phaseDate.getTime();
     const daysSinceKnownNewMoon = (timestampMs - KNOWN_NEW_MOON_UTC_MS) / 86400000;
     const cyclePosition = ((daysSinceKnownNewMoon % LUNAR_CYCLE_DAYS) + LUNAR_CYCLE_DAYS) % LUNAR_CYCLE_DAYS;
     const phaseIndex = Math.floor(((cyclePosition / LUNAR_CYCLE_DAYS) * MOON_PHASE_EMOJIS.length) + 0.5) % MOON_PHASE_EMOJIS.length;
@@ -1996,7 +2239,7 @@ function getApproximateMoonPhaseEmoji(date = new Date()) {
   }
 }
 
-function formatScanMetadataLines(gitSheet) {
+function formatScanMetadataLines(gitSheet: unknown): string[] {
   const metadata = getGitSheetMetadata(gitSheet);
   const lines = [];
 
@@ -2026,7 +2269,7 @@ function formatScanMetadataLines(gitSheet) {
   return lines;
 }
 
-function renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle) {
+function renderSummaryLines(summary: GitWallSummary, summaryTitle: string, useEmoji: boolean, summaryStyle: string): string[] {
   if (summaryStyle === "pit-wall") {
     return formatSummaryPitWall(summary, useEmoji);
   }
@@ -2038,7 +2281,7 @@ function renderSummaryLines(summary, summaryTitle, useEmoji, summaryStyle) {
   return formatSummaryCallout(summary, summaryTitle, useEmoji);
 }
 
-function formatSummaryCallout(summary, summaryTitle, useEmoji) {
+function formatSummaryCallout(summary: GitWallSummary, summaryTitle: string, useEmoji: boolean): string[] {
   return [
     `> [!summary] ${summaryTitle}`,
     `> ${maybeEmoji("🧭", `Scanned: **${formatNumber(summary.reposScanned)}** repos`, useEmoji)}`,
@@ -2050,7 +2293,7 @@ function formatSummaryCallout(summary, summaryTitle, useEmoji) {
   ];
 }
 
-function formatSummaryScoreboard(summary, useEmoji) {
+function formatSummaryScoreboard(summary: GitWallSummary, useEmoji: boolean): string[] {
   const title = useEmoji ? "### 🎮 Git Scoreboard" : "### Git Scoreboard";
   return [
     title,
@@ -2066,7 +2309,7 @@ function formatSummaryScoreboard(summary, useEmoji) {
   ];
 }
 
-function formatSummaryPitWall(summary, useEmoji) {
+function formatSummaryPitWall(summary: GitWallSummary, useEmoji: boolean): string[] {
   const title = useEmoji ? "### 🧱 Pit Wall" : "### Pit Wall";
   return [
     title,
@@ -2080,18 +2323,7 @@ function formatSummaryPitWall(summary, useEmoji) {
   ];
 }
 
-function getSummaryValues(summary) {
-  return [
-    formatNumber(summary.reposScanned),
-    formatNumber(summary.reposTouchedToday),
-    formatNumber(summary.commitsToday),
-    formatNumber(summary.dirtyRepos),
-    formatNumber(summary.unpushedCommits),
-    formatNumber(summary.behindCommits),
-  ];
-}
-
-function formatActivityStatus(summary) {
+function formatActivityStatus(summary: GitWallSummary): string {
   const commitsToday = toNumber(summary.commitsToday);
   const reposTouchedToday = formatNumber(summary.reposTouchedToday);
   const commitLabel = commitsToday === 1 ? "commit" : "commits";
@@ -2099,22 +2331,29 @@ function formatActivityStatus(summary) {
   return `${commitsToday} ${commitLabel} across ${reposTouchedToday} repos`;
 }
 
-function formatGarageStatus(summary) {
+function formatGarageStatus(summary: GitWallSummary): string {
   const dirtyRepos = toNumber(summary.dirtyRepos);
   return dirtyRepos === 0 ? "All included repos are clean" : `${dirtyRepos} repos need tidy-up`;
 }
 
-function formatLaunchStatus(summary) {
+function formatLaunchStatus(summary: GitWallSummary): string {
   const unpushedCommits = toNumber(summary.unpushedCommits);
   return unpushedCommits === 0 ? "Clear, nothing unpushed" : `${unpushedCommits} unpushed commits`;
 }
 
-function formatSyncStatus(summary) {
+function formatSyncStatus(summary: GitWallSummary): string {
   const behindCommits = toNumber(summary.behindCommits);
   return behindCommits === 0 ? "Clear, nothing behind" : `${behindCommits} commits behind remote`;
 }
 
-function renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoji, repoView, tableFormat) {
+function renderRepoSectionLines(
+  repos: GitWallRepo[],
+  reposWithNotes: GitWallRepo[],
+  repoSectionTitle: string,
+  useEmoji: boolean,
+  repoView: string,
+  tableFormat: string
+): string[] {
   if (repoView === "status-cards") {
     return renderRepoStatusCardLines(repos, reposWithNotes, repoSectionTitle, useEmoji);
   }
@@ -2122,7 +2361,13 @@ function renderRepoSectionLines(repos, reposWithNotes, repoSectionTitle, useEmoj
   return renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat);
 }
 
-function renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji, tableFormat) {
+function renderRepoTableLines(
+  repos: GitWallRepo[],
+  reposWithNotes: GitWallRepo[],
+  repoSectionTitle: string,
+  useEmoji: boolean,
+  tableFormat: string
+): string[] {
   const lines = [`### ${repoSectionTitle}`, "", formatRepoTableHeader(useEmoji, tableFormat), formatRepoTableDivider(tableFormat)];
 
   if (repos.length === 0) {
@@ -2144,7 +2389,7 @@ function renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji,
     lines.push("");
 
     for (const repo of reposWithNotes) {
-      lines.push(`#### ${formatScalar(repo.name || "Unnamed repo")}`);
+      lines.push(`#### ${formatScalar(repo.name) || "Unnamed repo"}`);
       for (const note of normalizeNotes(repo.notes)) {
         lines.push(`- ${formatScalar(note)}`);
       }
@@ -2155,7 +2400,7 @@ function renderRepoTableLines(repos, reposWithNotes, repoSectionTitle, useEmoji,
   return lines;
 }
 
-function renderRepoStatusCardLines(repos, reposWithNotes, repoSectionTitle, useEmoji) {
+function renderRepoStatusCardLines(repos: GitWallRepo[], reposWithNotes: GitWallRepo[], repoSectionTitle: string, useEmoji: boolean): string[] {
   const lines = [`### ${repoSectionTitle}`];
 
   if (repos.length === 0) {
@@ -2174,7 +2419,7 @@ function renderRepoStatusCardLines(repos, reposWithNotes, repoSectionTitle, useE
   return lines;
 }
 
-function formatRepoStatusCard(repo, useEmoji) {
+function formatRepoStatusCard(repo: GitWallRepo, useEmoji: boolean): string[] {
   const callout = isRepoClear(repo) ? "success" : "warning";
   const title = formatRepoTitle(repo);
   const cleanStatus = repo.dirty ? maybeEmoji("🧹", "tidy needed", useEmoji) : maybeEmoji("✅", "clean", useEmoji);
@@ -2186,7 +2431,7 @@ function formatRepoStatusCard(repo, useEmoji) {
   ];
 }
 
-function appendRepoNotes(lines, reposWithNotes) {
+function appendRepoNotes(lines: string[], reposWithNotes: GitWallRepo[]): void {
   if (reposWithNotes.length === 0) {
     return;
   }
@@ -2196,7 +2441,7 @@ function appendRepoNotes(lines, reposWithNotes) {
   lines.push("");
 
   for (const repo of reposWithNotes) {
-    lines.push(`#### ${formatScalar(repo.name || "Unnamed repo")}`);
+    lines.push(`#### ${formatScalar(repo.name) || "Unnamed repo"}`);
     for (const note of normalizeNotes(repo.notes)) {
       lines.push(`- ${formatScalar(note)}`);
     }
@@ -2204,7 +2449,7 @@ function appendRepoNotes(lines, reposWithNotes) {
   }
 }
 
-function renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji, tidyView) {
+function renderTidySectionLines(dirtyRepos: GitWallRepo[], summary: GitWallSummary, tidySectionTitle: string, useEmoji: boolean, tidyView: string): string[] {
   if (tidyView === "shutdown-checklist") {
     return renderShutdownChecklistLines(dirtyRepos, summary, useEmoji);
   }
@@ -2212,7 +2457,7 @@ function renderTidySectionLines(dirtyRepos, summary, tidySectionTitle, useEmoji,
   return renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji);
 }
 
-function renderScanNotesLines(notes) {
+function renderScanNotesLines(notes: string[]): string[] {
   const lines = ["### Scan Notes", ""];
 
   for (const note of notes) {
@@ -2222,7 +2467,7 @@ function renderScanNotesLines(notes) {
   return lines;
 }
 
-function renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji) {
+function renderTidyQueueLines(dirtyRepos: GitWallRepo[], tidySectionTitle: string, useEmoji: boolean): string[] {
   const lines = [`### ${tidySectionTitle}`, ""];
 
   if (dirtyRepos.length === 0) {
@@ -2232,20 +2477,20 @@ function renderTidyQueueLines(dirtyRepos, tidySectionTitle, useEmoji) {
 
   for (const repo of dirtyRepos) {
     const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
-    lines.push(`- ${maybeEmoji("🧹", `${formatScalar(repo.name || "Unnamed repo")}${branch}`, useEmoji)}`);
+    lines.push(`- ${maybeEmoji("🧹", `${formatScalar(repo.name) || "Unnamed repo"}${branch}`, useEmoji)}`);
   }
 
   return lines;
 }
 
-function renderShutdownChecklistLines(dirtyRepos, summary, useEmoji) {
+function renderShutdownChecklistLines(dirtyRepos: GitWallRepo[], summary: GitWallSummary, useEmoji: boolean): string[] {
   const lines = [useEmoji ? "### 🧹 Shutdown Checklist" : "### Shutdown Checklist", ""];
   const unpushedCommits = toNumber(summary.unpushedCommits);
   const behindCommits = toNumber(summary.behindCommits);
 
   for (const repo of dirtyRepos) {
     const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
-    lines.push(`- [ ] ${maybeEmoji("🧹", `${formatScalar(repo.name || "Unnamed repo")}${branch} needs tidy-up`, useEmoji)}`);
+    lines.push(`- [ ] ${maybeEmoji("🧹", `${formatScalar(repo.name) || "Unnamed repo"}${branch} needs tidy-up`, useEmoji)}`);
   }
 
   if (unpushedCommits === 0) {
@@ -2267,17 +2512,18 @@ function renderShutdownChecklistLines(dirtyRepos, summary, useEmoji) {
   return lines;
 }
 
-function upsertSection(content, heading, sectionMarkdown) {
-  const cleanHeading = (heading || DEFAULT_SETTINGS.dailySectionHeading).trim();
-  const cleanSection = sectionMarkdown.trimEnd();
-  const ranges = findSectionRanges(content, cleanHeading);
+function upsertSection(content: unknown, heading: unknown, sectionMarkdown: unknown): string {
+  const text = asString(content);
+  const cleanHeading = formatScalar(heading) || DEFAULT_SETTINGS.dailySectionHeading;
+  const cleanSection = asString(sectionMarkdown).trimEnd();
+  const ranges = findSectionRanges(text, cleanHeading);
 
   if (ranges.length === 0) {
-    const prefix = content.trim().length > 0 ? `${content.trimEnd()}\n\n` : "";
+    const prefix = text.trim().length > 0 ? `${text.trimEnd()}\n\n` : "";
     return `${prefix}${cleanSection}\n`;
   }
 
-  let result = content;
+  let result = text;
   for (let index = ranges.length - 1; index >= 0; index -= 1) {
     const range = ranges[index];
     const replacement = index === 0 ? `${cleanSection}\n\n` : "";
@@ -2287,25 +2533,26 @@ function upsertSection(content, heading, sectionMarkdown) {
   return result.replace(/\n{4,}/g, "\n\n\n").trimEnd() + "\n";
 }
 
-function findSectionRanges(content, heading) {
+function findSectionRanges(content: unknown, heading: unknown): SectionRange[] {
+  const text = asString(content);
   const escapedHeading = escapeRegExp(heading);
   const headingPattern = new RegExp(`^${escapedHeading}\\s*$`, "gm");
-  const ranges = [];
+  const ranges: SectionRange[] = [];
   let match;
 
-  while ((match = headingPattern.exec(content)) !== null) {
+  while ((match = headingPattern.exec(text)) !== null) {
     const start = match.index;
     const headingEnd = match.index + match[0].length;
-    const afterHeading = content.slice(headingEnd);
+    const afterHeading = text.slice(headingEnd);
     const nextHeadingMatch = /\n##\s+/.exec(afterHeading);
-    const end = nextHeadingMatch ? headingEnd + nextHeadingMatch.index + 1 : content.length;
+    const end = nextHeadingMatch ? headingEnd + nextHeadingMatch.index + 1 : text.length;
     ranges.push({ start, end });
   }
 
   return ranges;
 }
 
-async function ensureFolder(vault, folderPath) {
+async function ensureFolder(vault: Vault, folderPath: unknown): Promise<void> {
   const cleanFolderPath = normalizeFolderPath(folderPath);
   if (!cleanFolderPath) {
     return;
@@ -2329,14 +2576,14 @@ async function ensureFolder(vault, folderPath) {
   }
 }
 
-async function scanConfiguredRepositories(configuredPaths, dateStamp, options = {}) {
+async function scanConfiguredRepositories(configuredPaths: unknown, dateStamp: string, options: ScanOptions = {}): Promise<GitWallSnapshot> {
   const repoPaths = normalizeRepoPaths(configuredPaths);
-  const repos = [];
-  const warnings = [];
+  const repos: GitWallRepo[] = [];
+  const warnings: string[] = [];
   const scanStartedAt = new Date().toISOString();
   const scanStartedAtMs = Date.now();
   const maxDurationMs = normalizeMaxScanDurationSeconds(options.maxDurationSeconds) * 1000;
-  const context = {
+  const context: ScanBudgetContext = {
     scanStartedAtMs,
     deadlineMs: scanStartedAtMs + maxDurationMs,
     currentRepoDeadlineMs: null,
@@ -2361,7 +2608,7 @@ async function scanConfiguredRepositories(configuredPaths, dateStamp, options = 
     const remainingRepoCount = repoPaths.length - index;
     context.currentRepoDeadlineMs = Math.min(context.deadlineMs, Date.now() + getPerRepoBudgetMs(context, remainingRepoCount));
 
-    let result;
+    let result: ScanLocalGitRepoResult;
     try {
       result = await scanLocalGitRepo(repoPath, dateStamp, Object.assign({}, options, { context }));
     } catch (error) {
@@ -2424,7 +2671,7 @@ async function scanConfiguredRepositories(configuredPaths, dateStamp, options = 
   };
 }
 
-async function scanLocalGitRepo(configuredPath, dateStamp, options) {
+async function scanLocalGitRepo(configuredPath: unknown, dateStamp: string, options: ScanOptions): Promise<ScanLocalGitRepoResult> {
   const repoPath = normalizeLocalPath(configuredPath);
 
   if (!repoPath) {
@@ -2482,7 +2729,7 @@ async function scanLocalGitRepo(configuredPath, dateStamp, options) {
   };
 }
 
-async function readGitBranch(repoPath, hasCommits, options) {
+async function readGitBranch(repoPath: string, hasCommits: boolean, options: ScanOptions): Promise<string> {
   if (!hasCommits) {
     return "";
   }
@@ -2496,12 +2743,12 @@ async function readGitBranch(repoPath, hasCommits, options) {
   return shortHead ? `detached:${shortenHash(shortHead)}` : "";
 }
 
-async function readGitDirtyState(repoPath, options) {
+async function readGitDirtyState(repoPath: string, options: ScanOptions): Promise<boolean> {
   const status = await tryGit(repoPath, ["status", "--porcelain"], options);
   return Boolean(status && status.trim().length > 0);
 }
 
-async function readGitCommitsForDate(repoPath, dateStamp, options) {
+async function readGitCommitsForDate(repoPath: string, dateStamp: string, options: ScanOptions): Promise<GitWallCommit[]> {
   const output = await tryGit(repoPath, [
     "log",
     `--since=${dateStamp}T00:00:00`,
@@ -2512,33 +2759,33 @@ async function readGitCommitsForDate(repoPath, dateStamp, options) {
   return parseGitCommitLines(output);
 }
 
-async function readLatestGitCommit(repoPath, options) {
+async function readLatestGitCommit(repoPath: string, options: ScanOptions): Promise<GitWallCommit | null> {
   const output = await tryGit(repoPath, ["log", "-1", "--format=%H%x1f%h%x1f%s"], options);
   const commits = parseGitCommitLines(output);
   return commits.length > 0 ? commits[0] : null;
 }
 
-async function readGitCount(repoPath, args, options) {
+async function readGitCount(repoPath: string, args: string[], options: ScanOptions): Promise<number> {
   const output = await tryGit(repoPath, args, options);
-  const count = Number.parseInt(String(output || "").trim(), 10);
+  const count = Number.parseInt(asString(output).trim(), 10);
   return Number.isFinite(count) ? count : 0;
 }
 
-function parseGitCommitLines(output) {
-  return String(output || "")
+function parseGitCommitLines(output: unknown): GitWallCommit[] {
+  return asString(output)
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
       const parts = line.split("\x1f");
-      const hash = parts[0] || "";
-      const shortHash = parts[1] || "";
-      const maybeTimestamp = parts[2] || "";
+      const hash = formatScalar(parts[0]);
+      const shortHash = formatScalar(parts[1]);
+      const maybeTimestamp = formatScalar(parts[2]);
       const hasTimestamp = parts.length >= 4 && isGitIsoTimestamp(maybeTimestamp);
       const messageParts = hasTimestamp ? parts.slice(3) : parts.slice(2);
-      const commit = {
-        hash: hash || "",
-        shortHash: shortHash || "",
+      const commit: GitWallCommit = {
+        hash,
+        shortHash,
         message: messageParts.join(" ").trim(),
       };
 
@@ -2550,11 +2797,11 @@ function parseGitCommitLines(output) {
     });
 }
 
-function isGitIsoTimestamp(value) {
+function isGitIsoTimestamp(value: unknown): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(formatScalar(value));
 }
 
-function summarizeRepos(repos, scannedCount) {
+function summarizeRepos(repos: GitWallRepo[], scannedCount: number): GitWallSummary {
   return {
     reposScanned: scannedCount,
     reposIncluded: repos.length,
@@ -2566,11 +2813,11 @@ function summarizeRepos(repos, scannedCount) {
   };
 }
 
-function runGit(repoPath, args, options = {}) {
+function runGit(repoPath: string, args: string[], options: ScanOptions = {}): Promise<string> {
   const timeoutMs = getGitCommandTimeoutMs(options);
 
   if (timeoutMs <= 0) {
-    const error = new Error("Scan budget exceeded before Git command could start.");
+    const error = new Error("Scan budget exceeded before Git command could start.") as GitCommandError;
     error.code = getGlobalRemainingScanBudgetMs(options.context) <= 250 ? "LJ_OS_SCAN_BUDGET_EXCEEDED" : "LJ_OS_REPO_BUDGET_EXCEEDED";
     error.isGitTimeout = true;
     error.gitArgs = args;
@@ -2588,24 +2835,25 @@ function runGit(repoPath, args, options = {}) {
       },
       (error, stdout, stderr) => {
         if (error) {
-          error.stdout = stdout;
-          error.stderr = stderr;
-          error.gitArgs = args;
-          if (error.killed || error.code === "ETIMEDOUT") {
-            error.code = error.code || "ETIMEDOUT";
-            error.isGitTimeout = true;
+          const gitError = asGitCommandError(error);
+          gitError.stdout = asString(stdout);
+          gitError.stderr = asString(stderr);
+          gitError.gitArgs = args;
+          if (gitError.killed || gitError.code === "ETIMEDOUT") {
+            gitError.code = gitError.code || "ETIMEDOUT";
+            gitError.isGitTimeout = true;
           }
-          reject(error);
+          reject(gitError);
           return;
         }
 
-        resolve(String(stdout || "").trim());
+        resolve(asString(stdout).trim());
       }
     );
   });
 }
 
-async function tryGit(repoPath, args, options = {}) {
+async function tryGit(repoPath: string, args: string[], options: ScanOptions = {}): Promise<string> {
   try {
     return await runGit(repoPath, args, options);
   } catch (error) {
@@ -2614,11 +2862,11 @@ async function tryGit(repoPath, args, options = {}) {
   }
 }
 
-function hasScanBudget(context, minimumMs = 250) {
+function hasScanBudget(context: ScanBudgetContext | undefined, minimumMs = 250): boolean {
   return getGlobalRemainingScanBudgetMs(context) > minimumMs;
 }
 
-function getRemainingScanBudgetMs(context) {
+function getRemainingScanBudgetMs(context: ScanBudgetContext | undefined): number {
   if (!context || !Number.isFinite(context.deadlineMs)) {
     return DEFAULT_MAX_SCAN_DURATION_SECONDS * 1000;
   }
@@ -2630,7 +2878,7 @@ function getRemainingScanBudgetMs(context) {
   return Math.max(0, deadlineMs - Date.now());
 }
 
-function getGlobalRemainingScanBudgetMs(context) {
+function getGlobalRemainingScanBudgetMs(context: ScanBudgetContext | undefined): number {
   if (!context || !Number.isFinite(context.deadlineMs)) {
     return DEFAULT_MAX_SCAN_DURATION_SECONDS * 1000;
   }
@@ -2638,7 +2886,7 @@ function getGlobalRemainingScanBudgetMs(context) {
   return Math.max(0, context.deadlineMs - Date.now());
 }
 
-function getPerRepoBudgetMs(context, remainingRepoCount) {
+function getPerRepoBudgetMs(context: ScanBudgetContext, remainingRepoCount: number): number {
   const remainingMs = getGlobalRemainingScanBudgetMs(context);
 
   if (remainingRepoCount <= 1) {
@@ -2648,19 +2896,20 @@ function getPerRepoBudgetMs(context, remainingRepoCount) {
   return Math.max(1000, Math.min(10000, Math.floor(remainingMs / remainingRepoCount)));
 }
 
-function getGitCommandTimeoutMs(options = {}) {
+function getGitCommandTimeoutMs(options: ScanOptions = {}): number {
   const remainingMs = getRemainingScanBudgetMs(options.context);
   const maxCommandMs = normalizeMaxScanDurationSeconds(options.maxDurationSeconds) * 1000;
   return Math.max(0, Math.min(remainingMs, maxCommandMs));
 }
 
-function markScanTimeoutFromError(options = {}, error, repoPath) {
+function markScanTimeoutFromError(options: ScanOptions = {}, error: unknown, repoPath: unknown): void {
   if (!isScanTimeoutError(error) || !options.context) {
     return;
   }
 
+  const gitError = asGitCommandError(error);
   const repoLabel = repoPath ? ` while scanning ${formatLocalPath(repoPath)}` : "";
-  const globalBudgetExceeded = getGlobalRemainingScanBudgetMs(options.context) <= 250 || error.code === "LJ_OS_SCAN_BUDGET_EXCEEDED";
+  const globalBudgetExceeded = getGlobalRemainingScanBudgetMs(options.context) <= 250 || gitError.code === "LJ_OS_SCAN_BUDGET_EXCEEDED";
   const warning = globalBudgetExceeded
     ? `Scan budget exceeded${repoLabel}.`
     : `Repo scan budget exceeded${repoLabel}; continuing with remaining repos.`;
@@ -2674,19 +2923,25 @@ function markScanTimeoutFromError(options = {}, error, repoPath) {
   }
 }
 
-function isScanTimeoutError(error) {
+function isScanTimeoutError(error: unknown): boolean {
   if (!error) {
     return false;
   }
 
-  return error.isGitTimeout === true || error.code === "ETIMEDOUT" || error.code === "LJ_OS_SCAN_BUDGET_EXCEEDED" || error.code === "LJ_OS_REPO_BUDGET_EXCEEDED";
+  const gitError = asGitCommandError(error);
+  return (
+    gitError.isGitTimeout === true ||
+    gitError.code === "ETIMEDOUT" ||
+    gitError.code === "LJ_OS_SCAN_BUDGET_EXCEEDED" ||
+    gitError.code === "LJ_OS_REPO_BUDGET_EXCEEDED"
+  );
 }
 
-function normalizeScanTrigger(value) {
-  return SCAN_TRIGGERS.includes(value) ? value : "manual";
+function normalizeScanTrigger(value: unknown): ScanTrigger {
+  return SCAN_TRIGGERS.includes(value as ScanTrigger) ? (value as ScanTrigger) : "manual";
 }
 
-function normalizeAutoScanIntervalMinutes(value) {
+function normalizeAutoScanIntervalMinutes(value: unknown): number {
   const minutes = Math.floor(toNumber(value));
   if (minutes <= 0) {
     return DEFAULT_SETTINGS.autoScanIntervalMinutes;
@@ -2695,7 +2950,7 @@ function normalizeAutoScanIntervalMinutes(value) {
   return Math.max(minutes, MIN_AUTO_SCAN_INTERVAL_MINUTES);
 }
 
-function normalizeMaxScanDurationSeconds(value) {
+function normalizeMaxScanDurationSeconds(value: unknown): number {
   const seconds = Math.floor(toNumber(value));
   if (seconds <= 0) {
     return DEFAULT_MAX_SCAN_DURATION_SECONDS;
@@ -2719,15 +2974,15 @@ function normalizeScanState(value: unknown): ScanState {
     lastSkippedRepoCount: toNumber(state.lastSkippedRepoCount),
     lastFailedRepoCount: toNumber(state.lastFailedRepoCount),
     lastScanTimedOut: state.lastScanTimedOut === true,
-    lastScanStatus: formatScalar(state.lastScanStatus || "not scanned yet"),
+    lastScanStatus: formatScalar(state.lastScanStatus) || "not scanned yet",
   };
 }
 
 function getGitSheetMetadata(gitSheet: unknown): GitSheetMetadata {
-  const sheet = toRecord(gitSheet);
+  const sheet = asGitWallSnapshot(gitSheet);
 
   return {
-    scanCompletedAt: formatScalar(sheet.scanCompletedAt || sheet.generatedAt),
+    scanCompletedAt: formatScalar(sheet.scanCompletedAt) || formatScalar(sheet.generatedAt),
     durationMs: toNumber(sheet.durationMs),
     repoCount: toNumber(sheet.repoCount),
     scannedRepoCount: toNumber(sheet.scannedRepoCount),
@@ -2735,7 +2990,7 @@ function getGitSheetMetadata(gitSheet: unknown): GitSheetMetadata {
     failedRepoCount: toNumber(sheet.failedRepoCount),
     timedOut: sheet.timedOut === true,
     scanTrigger: formatScalar(sheet.scanTrigger),
-    warnings: Array.isArray(sheet.warnings) ? sheet.warnings : [],
+    warnings: asArray<unknown>(sheet.warnings),
   };
 }
 
@@ -2769,7 +3024,7 @@ function formatScanStateDuration(scanState: ScanState): string {
   return durationMs > 0 ? formatDurationMs(durationMs) : "Not available";
 }
 
-function formatDurationMs(value) {
+function formatDurationMs(value: unknown): string {
   const durationMs = toNumber(value);
 
   if (durationMs <= 0) {
@@ -2783,7 +3038,7 @@ function formatDurationMs(value) {
   return `${(durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0)}s`;
 }
 
-function formatTimestampForSettings(value) {
+function formatTimestampForSettings(value: unknown): string {
   const text = formatScalar(value);
   if (!text) {
     return "Not available";
@@ -2919,7 +3174,7 @@ function getConfigDirFolderName(configDir: unknown): string {
   return parts.length > 0 ? parts[parts.length - 1] : "";
 }
 
-function validateTrackedGitRepo(repoPath) {
+function validateTrackedGitRepo(repoPath: string): { valid: boolean; message: string } {
   if (hasGitMetadata(repoPath)) {
     return { valid: true };
   }
@@ -2930,7 +3185,7 @@ function validateTrackedGitRepo(repoPath) {
   };
 }
 
-function hasGitMetadata(repoPath) {
+function hasGitMetadata(repoPath: string): boolean {
   try {
     const stats = fs.statSync(path.join(repoPath, ".git"));
     return stats.isDirectory() || stats.isFile();
@@ -2940,7 +3195,7 @@ function hasGitMetadata(repoPath) {
 }
 
 function shouldSkipDiscoveryFolder(name: unknown, skipFolderNames: Set<string> = DISCOVERY_SKIP_FOLDER_NAMES): boolean {
-  const normalizedName = String(name || "").trim().toLowerCase();
+  const normalizedName = asString(name).trim().toLowerCase();
 
   if (!normalizedName) {
     return true;
@@ -2953,11 +3208,11 @@ function shouldSkipDiscoveryFolder(name: unknown, skipFolderNames: Set<string> =
   return skipFolderNames.has(normalizedName);
 }
 
-function mergeUniquePaths(existingPaths, newPaths) {
+function mergeUniquePaths(existingPaths: unknown, newPaths: unknown): string[] {
   return normalizeRepoPaths([...normalizeRepoPaths(existingPaths), ...normalizeRepoPaths(newPaths)]);
 }
 
-function formatNotGitRepositoryMessage(repoPath) {
+function formatNotGitRepositoryMessage(repoPath: string): string {
   const formattedPath = formatLocalPath(repoPath);
 
   if (isDriveRoot(repoPath)) {
@@ -2967,14 +3222,14 @@ function formatNotGitRepositoryMessage(repoPath) {
   return `${formattedPath} is not a Git repository. Use Discover repositories if this is a parent folder.`;
 }
 
-function isDriveRoot(repoPath) {
+function isDriveRoot(repoPath: string): boolean {
   const normalizedPath = normalizeLocalPath(repoPath);
   const rootPath = normalizeLocalPath(path.parse(normalizedPath).root);
   return normalizedPath === rootPath;
 }
 
 function normalizeRepoPaths(value: unknown): string[] {
-  const rawPaths = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  const rawPaths = Array.isArray(value) ? value : asString(value).split(/\r?\n/);
   const seen = new Set<string>();
   const repoPaths: string[] = [];
 
@@ -2997,7 +3252,7 @@ function normalizeRepoPaths(value: unknown): string[] {
 }
 
 function normalizeLocalPath(value: unknown): string {
-  let text = String(value || "").trim();
+  let text = asString(value).trim();
   if (!text) {
     return "";
   }
@@ -3029,13 +3284,13 @@ function formatGitFailure(repoPath: string, error: unknown): string {
 }
 
 function formatGitError(error: unknown): string {
-  const gitError = toRecord(error);
+  const gitError = asGitCommandError(error);
 
   if (gitError.code === "ENOENT") {
     return "Git is not available to Obsidian. Install Git or make sure Git is in PATH.";
   }
 
-  const stderr = String(gitError.stderr || "").trim();
+  const stderr = asString(gitError.stderr).trim();
   if (stderr) {
     if (/not a git repository/i.test(stderr)) {
       return "This path is not a Git repository. Use Discover repositories if it is a parent folder.";
@@ -3044,7 +3299,7 @@ function formatGitError(error: unknown): string {
     return stderr.split(/\r?\n/)[0].trim();
   }
 
-  const message = String(gitError.message || "").trim();
+  const message = asString(gitError.message).trim();
   if (/not a git repository/i.test(message)) {
     return "This path is not a Git repository. Use Discover repositories if it is a parent folder.";
   }
@@ -3057,11 +3312,11 @@ function inferRepoName(repoPath: string): string {
 }
 
 function formatLocalPath(value: unknown): string {
-  return String(value || "").replace(/\\/g, "/");
+  return asString(value).replace(/\\/g, "/");
 }
 
 function joinVaultPath(...parts: unknown[]): string {
-  return normalizePath(parts.map((part) => String(part || "").trim()).filter(Boolean).join("/"));
+  return normalizePath(parts.map((part) => asString(part).trim()).filter(Boolean).join("/"));
 }
 
 function hasOwn(object: unknown, key: string): boolean {
@@ -3079,22 +3334,22 @@ function sanitizeFolderSetting(value: unknown, fallback: string): string {
 }
 
 function normalizeFolderPath(value: unknown): string {
-  return normalizePath(String(value || "").trim().replace(/^\/+|\/+$/g, ""));
+  return normalizePath(asString(value).trim().replace(/^\/+|\/+$/g, ""));
 }
 
-function normalizeRenderSettings(settingsOrHeading) {
+function normalizeRenderSettings(settingsOrHeading: unknown): LjOsSettings & UnknownRecord {
   if (typeof settingsOrHeading === "string") {
     return Object.assign({}, DEFAULT_SETTINGS, { dailySectionHeading: settingsOrHeading });
   }
 
-  return Object.assign({}, DEFAULT_SETTINGS, settingsOrHeading || {});
+  return Object.assign({}, DEFAULT_SETTINGS, toRecord(settingsOrHeading));
 }
 
-function getRecentLocalDateInfos(dayCount = 7, endDate = new Date()) {
+function getRecentLocalDateInfos(dayCount = 7, endDate: unknown = new Date()): RecentGitSheet[] {
   const count = Math.max(1, Math.floor(toNumber(dayCount)) || 7);
-  const end = endDate instanceof Date && Number.isFinite(endDate.getTime()) ? endDate : new Date();
+  const end = asDate(endDate) || new Date();
   const todayStamp = formatLocalDateStamp(new Date());
-  const dates = [];
+  const dates: RecentGitSheet[] = [];
 
   for (let offset = count - 1; offset >= 0; offset -= 1) {
     const date = new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset, 12, 0, 0, 0);
@@ -3109,8 +3364,8 @@ function getRecentLocalDateInfos(dayCount = 7, endDate = new Date()) {
   return dates;
 }
 
-function formatLocalDateStamp(date) {
-  const value = date instanceof Date && Number.isFinite(date.getTime()) ? date : new Date();
+function formatLocalDateStamp(date: unknown): string {
+  const value = asDate(date) || new Date();
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, "0");
   const day = String(value.getDate()).padStart(2, "0");
@@ -3118,7 +3373,7 @@ function formatLocalDateStamp(date) {
   return `${year}-${month}-${day}`;
 }
 
-function parseLocalDateStamp(value) {
+function parseLocalDateStamp(value: unknown): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(formatScalar(value));
   if (!match) {
     return null;
@@ -3132,49 +3387,53 @@ function parseLocalDateStamp(value) {
   return Number.isFinite(date.getTime()) ? date : null;
 }
 
-function formatShortWeekday(date) {
+function formatShortWeekday(date: Date): string {
   return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()] || "";
 }
 
-function normalizeTableFormat(value) {
-  return ["compact", "standard", "detailed", "emoji-board"].includes(value) ? value : DEFAULT_SETTINGS.tableFormat;
+function normalizeTableFormat(value: unknown): string {
+  const text = formatScalar(value);
+  return ["compact", "standard", "detailed", "emoji-board"].includes(text) ? text : DEFAULT_SETTINGS.tableFormat;
 }
 
-function normalizeSummaryStyle(value) {
-  return ["callout", "scoreboard", "pit-wall"].includes(value) ? value : DEFAULT_SETTINGS.summaryStyle;
+function normalizeSummaryStyle(value: unknown): string {
+  const text = formatScalar(value);
+  return ["callout", "scoreboard", "pit-wall"].includes(text) ? text : DEFAULT_SETTINGS.summaryStyle;
 }
 
-function normalizeRepoView(value) {
-  return ["table", "status-cards"].includes(value) ? value : DEFAULT_SETTINGS.repoView;
+function normalizeRepoView(value: unknown): string {
+  const text = formatScalar(value);
+  return ["table", "status-cards"].includes(text) ? text : DEFAULT_SETTINGS.repoView;
 }
 
-function normalizeTidyView(value) {
-  return ["queue", "shutdown-checklist"].includes(value) ? value : DEFAULT_SETTINGS.tidyView;
+function normalizeTidyView(value: unknown): string {
+  const text = formatScalar(value);
+  return ["queue", "shutdown-checklist"].includes(text) ? text : DEFAULT_SETTINGS.tidyView;
 }
 
-function sanitizeTextSetting(value, fallback) {
+function sanitizeTextSetting(value: unknown, fallback: string): string {
   const text = formatScalar(value);
   return text || fallback;
 }
 
-function sanitizeCoordinateSetting(value) {
+function sanitizeCoordinateSetting(value: unknown): string {
   return formatScalar(value).trim();
 }
 
-function formatTitle(value, fallback, useEmoji) {
-  const title = stripMarkdownHeadingMarkers(value || fallback) || stripMarkdownHeadingMarkers(fallback);
+function formatTitle(value: unknown, fallback: string, useEmoji: boolean): string {
+  const title = stripMarkdownHeadingMarkers(formatScalar(value) || fallback) || stripMarkdownHeadingMarkers(fallback);
   return useEmoji ? title : stripLeadingEmoji(title);
 }
 
-function stripMarkdownHeadingMarkers(value) {
+function stripMarkdownHeadingMarkers(value: unknown): string {
   return formatScalar(value).replace(/^#{1,6}\s+/, "").trim();
 }
 
-function maybeEmoji(icon, text, useEmoji) {
+function maybeEmoji(icon: string, text: string, useEmoji: boolean): string {
   return useEmoji ? `${icon} ${text}` : text;
 }
 
-function stripLeadingEmoji(text) {
+function stripLeadingEmoji(text: unknown): string {
   let value = formatScalar(text);
   const leadingEmojiPattern = /^(?:[\s\uFE0F\u200D]*(?:🏁|🧭|🛠|🧰|🧹|🧼|🚀|📥|✅|🌿)[\s\uFE0F\u200D]*)+/u;
 
@@ -3185,25 +3444,24 @@ function stripLeadingEmoji(text) {
   return value;
 }
 
-function formatNumber(value) {
+function formatNumber(value: unknown): string {
   return Number.isFinite(Number(value)) ? String(Number(value)) : "0";
 }
 
-function toNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
+function toNumber(value: unknown): number {
+  return asNumber(value);
 }
 
-function toOptionalNumber(value) {
+function toOptionalNumber(value: unknown): number | null {
   if (value === null || typeof value === "undefined" || (typeof value === "string" && value.trim() === "")) {
     return null;
   }
 
-  const number = Number(value);
+  const number = asNumber(value, Number.NaN);
   return Number.isFinite(number) ? number : null;
 }
 
-function formatRepoTableHeader(useEmoji, tableFormat) {
+function formatRepoTableHeader(useEmoji: boolean, tableFormat: string): string {
   if (tableFormat === "emoji-board") {
     return useEmoji
       ? "| 🧰 Repo | 🌿 Branch | 🏁 Activity | 🧼 Tidy | 🚀 Push | 📥 Pull |"
@@ -3227,7 +3485,7 @@ function formatRepoTableHeader(useEmoji, tableFormat) {
     : "| Repo | Branch | Commits | Status | Unpushed | Behind | Latest |";
 }
 
-function formatRepoTableDivider(tableFormat) {
+function formatRepoTableDivider(tableFormat: string): string {
   if (tableFormat === "emoji-board") {
     return "| --- | --- | :---: | :---: | :---: | :---: |";
   }
@@ -3243,7 +3501,7 @@ function formatRepoTableDivider(tableFormat) {
   return "| --- | --- | ---: | :---: | ---: | ---: | --- |";
 }
 
-function formatEmptyRepoTableRow(useEmoji, tableFormat) {
+function formatEmptyRepoTableRow(useEmoji: boolean, tableFormat: string): string {
   const status = formatRepoStatus(false, useEmoji);
 
   if (tableFormat === "emoji-board") {
@@ -3268,13 +3526,13 @@ function formatEmptyRepoTableRow(useEmoji, tableFormat) {
   return toMarkdownTableRow(["No repos included", "", "0", status, "0", "0", "No commits yet"]);
 }
 
-function formatRepoTableRow(repo, useEmoji, tableFormat) {
+function formatRepoTableRow(repo: GitWallRepo, useEmoji: boolean, tableFormat: string): string {
   const status = formatRepoStatus(repo.dirty, useEmoji);
 
   if (tableFormat === "emoji-board") {
     return toMarkdownTableRow([
-      repo.name || "Unnamed repo",
-      repo.branch || "",
+      formatScalar(repo.name) || "Unnamed repo",
+      formatScalar(repo.branch),
       formatActivityCell(repo.commitsToday, useEmoji),
       formatBoardTidyCell(repo.dirty, useEmoji),
       formatBoardPushCell(repo.unpushedCommits, useEmoji),
@@ -3284,8 +3542,8 @@ function formatRepoTableRow(repo, useEmoji, tableFormat) {
 
   if (tableFormat === "compact") {
     return toMarkdownTableRow([
-      repo.name || "Unnamed repo",
-      repo.branch || "",
+      formatScalar(repo.name) || "Unnamed repo",
+      formatScalar(repo.branch),
       status,
       formatNumber(repo.commitsToday),
     ]);
@@ -3293,20 +3551,20 @@ function formatRepoTableRow(repo, useEmoji, tableFormat) {
 
   if (tableFormat === "detailed") {
     return toMarkdownTableRow([
-      repo.name || "Unnamed repo",
-      repo.branch || "",
+      formatScalar(repo.name) || "Unnamed repo",
+      formatScalar(repo.branch),
       formatNumber(repo.commitsToday),
       status,
       formatNumber(repo.unpushedCommits),
       formatNumber(repo.behindUpstream),
       formatLatestCommit(repo.latestCommit),
-      repo.path || "",
+      formatScalar(repo.path),
     ]);
   }
 
   return toMarkdownTableRow([
-    repo.name || "Unnamed repo",
-    repo.branch || "",
+    formatScalar(repo.name) || "Unnamed repo",
+    formatScalar(repo.branch),
     formatNumber(repo.commitsToday),
     status,
     formatNumber(repo.unpushedCommits),
@@ -3315,36 +3573,36 @@ function formatRepoTableRow(repo, useEmoji, tableFormat) {
   ]);
 }
 
-function toMarkdownTableRow(cells) {
+function toMarkdownTableRow(cells: unknown[]): string {
   return `| ${cells.map((cell) => tableCell(cell)).join(" | ")} |`;
 }
 
-function isRepoClear(repo) {
+function isRepoClear(repo: GitWallRepo): boolean {
   return !repo.dirty && toNumber(repo.unpushedCommits) === 0 && toNumber(repo.behindUpstream) === 0;
 }
 
-function formatRepoTitle(repo) {
-  const name = formatScalar(repo.name || "Unnamed repo");
+function formatRepoTitle(repo: GitWallRepo): string {
+  const name = formatScalar(repo.name) || "Unnamed repo";
   const branch = repo.branch ? ` \`${formatInlineCode(repo.branch)}\`` : "";
   return `${name}${branch}`;
 }
 
-function formatCommitCount(value) {
+function formatCommitCount(value: unknown): string {
   const count = toNumber(value);
   return `${count} ${count === 1 ? "commit" : "commits"}`;
 }
 
-function formatUnpushedStatus(value, useEmoji) {
+function formatUnpushedStatus(value: unknown, useEmoji: boolean): string {
   const count = toNumber(value);
   return maybeEmoji("🚀", `${count} unpushed`, useEmoji);
 }
 
-function formatBehindStatus(value, useEmoji) {
+function formatBehindStatus(value: unknown, useEmoji: boolean): string {
   const count = toNumber(value);
   return maybeEmoji("📥", `${count} behind`, useEmoji);
 }
 
-function formatActivityCell(value, useEmoji) {
+function formatActivityCell(value: unknown, useEmoji: boolean): string {
   const count = toNumber(value);
 
   if (!useEmoji) {
@@ -3366,7 +3624,7 @@ function formatActivityCell(value, useEmoji) {
   return "🏁🏁🏁";
 }
 
-function formatBoardTidyCell(value, useEmoji) {
+function formatBoardTidyCell(value: unknown, useEmoji: boolean): string {
   if (!useEmoji) {
     return value ? "Tidy" : "Clean";
   }
@@ -3374,7 +3632,7 @@ function formatBoardTidyCell(value, useEmoji) {
   return value ? "🧹" : "✅";
 }
 
-function formatBoardPushCell(value, useEmoji) {
+function formatBoardPushCell(value: unknown, useEmoji: boolean): string {
   const count = toNumber(value);
 
   if (!useEmoji) {
@@ -3384,7 +3642,7 @@ function formatBoardPushCell(value, useEmoji) {
   return count > 0 ? `🚀 ${count}` : "✅";
 }
 
-function formatBoardPullCell(value, useEmoji) {
+function formatBoardPullCell(value: unknown, useEmoji: boolean): string {
   const count = toNumber(value);
 
   if (!useEmoji) {
@@ -3394,7 +3652,7 @@ function formatBoardPullCell(value, useEmoji) {
   return count > 0 ? `📥 ${count}` : "✅";
 }
 
-function formatRepoStatus(value, useEmoji) {
+function formatRepoStatus(value: unknown, useEmoji: boolean): string {
   if (!useEmoji) {
     return value ? "Tidy" : "Clean";
   }
@@ -3402,13 +3660,13 @@ function formatRepoStatus(value, useEmoji) {
   return value ? "🧹 Tidy" : "✅ Clean";
 }
 
-function formatGeneratedAt(value) {
+function formatGeneratedAt(value: unknown): string {
   if (!value) {
     return "Not provided";
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const date = asDate(value);
+  if (!date) {
     return formatScalar(value);
   }
 
@@ -3422,23 +3680,23 @@ function formatGeneratedAt(value) {
   });
 }
 
-function formatScalar(value) {
+function formatScalar(value: unknown): string {
   if (value === null || value === undefined) {
     return "";
   }
 
-  return String(value).replace(/\r?\n/g, " ").trim();
+  return asString(value).replace(/\r?\n/g, " ").trim();
 }
 
-function tableCell(value) {
+function tableCell(value: unknown): string {
   return formatScalar(value).replace(/\|/g, "\\|");
 }
 
-function formatInlineCode(value) {
+function formatInlineCode(value: unknown): string {
   return formatScalar(value).replace(/`/g, "'");
 }
 
-function formatLatestCommit(latestCommit) {
+function formatLatestCommit(latestCommit: unknown): string {
   if (!latestCommit) {
     return "No commits yet";
   }
@@ -3447,8 +3705,18 @@ function formatLatestCommit(latestCommit) {
     return formatScalar(latestCommit);
   }
 
-  const hash = latestCommit.shortHash || latestCommit.abbreviatedHash || latestCommit.hash || latestCommit.sha || latestCommit.id;
-  const message = latestCommit.subject || latestCommit.message || latestCommit.title || latestCommit.summary;
+  const commit = asGitWallCommit(latestCommit);
+  const hash =
+    formatScalar(commit?.shortHash) ||
+    formatScalar(commit?.abbreviatedHash) ||
+    formatScalar(commit?.hash) ||
+    formatScalar(commit?.sha) ||
+    formatScalar(commit?.id);
+  const message =
+    formatScalar(commit?.subject) ||
+    formatScalar(commit?.message) ||
+    formatScalar(commit?.title) ||
+    formatScalar(commit?.summary);
 
   if (hash && message) {
     return `${shortenHash(hash)} - ${message}`;
@@ -3462,19 +3730,19 @@ function formatLatestCommit(latestCommit) {
     return formatScalar(message);
   }
 
-  return formatScalar(JSON.stringify(latestCommit));
+  return formatScalar(latestCommit);
 }
 
-function shortenHash(value) {
+function shortenHash(value: unknown): string {
   const text = formatScalar(value);
   return text.length > 12 ? text.slice(0, 12) : text;
 }
 
-function hasNotes(notes) {
+function hasNotes(notes: unknown): boolean {
   return normalizeNotes(notes).length > 0;
 }
 
-function normalizeNotes(notes) {
+function normalizeNotes(notes: unknown): string[] {
   if (!notes) {
     return [];
   }
@@ -3495,6 +3763,6 @@ function normalizeNotes(notes) {
     .filter(Boolean);
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function escapeRegExp(value: unknown): string {
+  return asString(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

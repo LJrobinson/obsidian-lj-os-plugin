@@ -597,7 +597,7 @@ class LjOsSettingTab extends PluginSettingTab {
     const scanRoots = normalizeRepoPaths(this.plugin.settings.scanRoots);
     const trackedRepoPaths = normalizeRepoPaths(this.plugin.settings.trackedRepoPaths);
 
-    new Setting(containerEl).setName("LJ OS").setHeading();
+    new Setting(containerEl).setName("Overview").setHeading();
     new Setting(containerEl).setName("Setup").setHeading();
 
     renderSetupCard(containerEl, this.plugin, scanRoots, trackedRepoPaths);
@@ -643,7 +643,7 @@ class LjOsSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Tracked Repositories").setHeading();
 
     renderFullWidthPathTextareaSetting(containerEl, {
-      label: "Repositories LJ OS scans",
+      label: "Repositories to scan",
       description: "Validated Git repos LJ OS scans automatically.",
       placeholder: "G:\\obsidian-lj-os-plugin\nG:\\CannabisMath\nG:\\trackingthc.com",
       rows: 3,
@@ -697,7 +697,7 @@ class LjOsSettingTab extends PluginSettingTab {
     }
 
     new Setting(containerEl)
-      .setName("Refresh in background when LJ OS view opens")
+      .setName("Refresh in background when view opens")
       .setDesc("Shows cached data immediately, then quietly refreshes scan data in the background.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.scanOnViewOpen !== false).onChange(async (value) => {
@@ -930,7 +930,7 @@ class LjOsSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Customize Labels").setHeading();
 
     new Setting(containerEl)
-      .setName("Show customized label settings")
+      .setName("Show label options")
       .setDesc("Show title and section-name fields.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showAdvancedSettings === true).onChange(async (value) => {
@@ -1008,10 +1008,10 @@ class LjOsSettingTab extends PluginSettingTab {
       );
     }
 
-    new Setting(containerEl).setName("Advanced Scanning Settings").setHeading();
+    new Setting(containerEl).setName("Advanced Scanning").setHeading();
 
     new Setting(containerEl)
-      .setName("Show advanced scanning settings")
+      .setName("Show advanced scan options")
       .setDesc("Optional scan limits and discovery details.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showAdvancedScanningSettings === true).onChange(async (value) => {
@@ -1067,14 +1067,11 @@ function renderSetupCard(containerEl, plugin, scanRoots, trackedRepoPaths) {
 
   const hint = document.createElement("p");
   hint.textContent = "Fastest setup: add your main repo folder or drive, click Discover repositories, then click Scan now.";
-  hint.style.marginBottom = "0";
+  hint.addClass("lj-os-settings-no-margin-bottom");
   panel.appendChild(hint);
 
   const actions = document.createElement("div");
-  actions.style.display = "flex";
-  actions.style.flexWrap = "wrap";
-  actions.style.gap = "8px";
-  actions.style.marginTop = "10px";
+  actions.addClass("lj-os-settings-actions");
   panel.appendChild(actions);
 
   actions.appendChild(createActionButton("Discover repositories", () => plugin.discoverRepositories({ showNotice: true }), true));
@@ -1086,9 +1083,8 @@ function renderSetupCard(containerEl, plugin, scanRoots, trackedRepoPaths) {
   if (scanRoots.length > 0 || trackedRepoPaths.length > 0) {
     const counts = document.createElement("p");
     counts.textContent = `${scanRoots.length} scan roots · ${trackedRepoPaths.length} tracked repos`;
-    counts.style.margin = "8px 0 0";
-    counts.style.fontSize = "12px";
-    counts.style.opacity = "0.75";
+    counts.addClass("lj-os-settings-muted");
+    counts.addClass("lj-os-settings-counts");
     panel.appendChild(counts);
   }
 }
@@ -1097,18 +1093,15 @@ function renderFullWidthPathTextareaSetting(containerEl, options) {
   const panel = createCompactPanel(containerEl, options.label);
   const description = document.createElement("div");
   description.textContent = options.description;
-  description.style.fontSize = "12px";
-  description.style.opacity = "0.75";
-  description.style.margin = "-2px 0 8px";
+  description.addClass("lj-os-settings-muted");
+  description.addClass("lj-os-settings-description");
   panel.appendChild(description);
 
   const textarea = document.createElement("textarea");
   textarea.rows = options.rows;
   textarea.placeholder = options.placeholder;
   textarea.value = options.value;
-  textarea.style.boxSizing = "border-box";
-  textarea.style.width = "100%";
-  textarea.style.minWidth = "100%";
+  textarea.addClass("lj-os-settings-textarea");
   textarea.addEventListener("change", async () => {
     await options.onChange(textarea.value);
   });
@@ -1133,7 +1126,7 @@ function renderScanStatusSummary(containerEl, plugin, trackedRepoPaths) {
   }
 
   primary.textContent = pieces.join(" · ");
-  primary.style.marginBottom = "6px";
+  primary.addClass("lj-os-settings-primary-status");
   panel.appendChild(primary);
 
   const secondary = document.createElement("p");
@@ -1152,9 +1145,7 @@ function renderScanStatusSummary(containerEl, plugin, trackedRepoPaths) {
   }
 
   secondary.textContent = secondaryPieces.join(" · ");
-  secondary.style.margin = "0";
-  secondary.style.fontSize = "12px";
-  secondary.style.opacity = "0.8";
+  secondary.addClass("lj-os-settings-secondary-status");
   panel.appendChild(secondary);
 }
 
@@ -1162,29 +1153,22 @@ function renderSectionOrderEditor(containerEl, plugin) {
   const order = normalizeSectionOrder(plugin.settings.sectionOrder);
   const panel = createCompactPanel(containerEl, "Section order");
   const list = document.createElement("div");
-  list.style.display = "flex";
-  list.style.flexDirection = "column";
-  list.style.gap = "8px";
+  list.addClass("lj-os-settings-list");
   panel.appendChild(list);
 
   order.forEach((sectionId, index) => {
     const section = getDashboardSection(sectionId);
     const row = document.createElement("div");
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.justifyContent = "space-between";
-    row.style.gap = "12px";
-    row.style.flexWrap = "wrap";
+    row.addClass("lj-os-settings-row");
     list.appendChild(row);
 
     const label = document.createElement("div");
     label.textContent = `${index + 1}. ${section.label}`;
-    label.style.fontWeight = "500";
+    label.addClass("lj-os-settings-row-label");
     row.appendChild(label);
 
     const actions = document.createElement("div");
-    actions.style.display = "flex";
-    actions.style.gap = "6px";
+    actions.addClass("lj-os-settings-row-actions");
     row.appendChild(actions);
 
     const moveUpButton = createActionButton(
@@ -1213,7 +1197,7 @@ function renderSectionOrderEditor(containerEl, plugin) {
   });
 
   const resetRow = document.createElement("div");
-  resetRow.style.marginTop = "10px";
+  resetRow.addClass("lj-os-settings-reset-row");
   resetRow.appendChild(
     createActionButton(
       "Reset layout",
@@ -1232,22 +1216,17 @@ function renderAdvancedScanningDetails(containerEl) {
   const panel = createCompactPanel(containerEl, "Discovery Details");
   const details = document.createElement("p");
   details.textContent = `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, .obsidian, .git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`;
-  details.style.margin = "0";
+  details.addClass("lj-os-settings-details");
   panel.appendChild(details);
 }
 
 function createCompactPanel(containerEl, title) {
   const panel = document.createElement("div");
-  panel.style.border = "1px solid var(--background-modifier-border)";
-  panel.style.borderRadius = "8px";
-  panel.style.padding = "12px";
-  panel.style.margin = "8px 0 14px";
-  panel.style.background = "var(--background-secondary)";
+  panel.addClass("lj-os-settings-card");
 
   const heading = document.createElement("div");
   heading.textContent = title;
-  heading.style.fontWeight = "600";
-  heading.style.marginBottom = "6px";
+  heading.addClass("lj-os-settings-card-heading");
   panel.appendChild(heading);
   containerEl.appendChild(panel);
   return panel;

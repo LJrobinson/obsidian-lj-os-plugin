@@ -1,0 +1,83 @@
+.lj-os-settings-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0 14px;
+  background: var(--background-secondary);
+}
+
+.lj-os-settings-card-heading {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.lj-os-settings-no-margin-bottom {
+  margin-bottom: 0;
+}
+
+.lj-os-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.lj-os-settings-muted {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.lj-os-settings-counts {
+  margin: 8px 0 0;
+}
+
+.lj-os-settings-description {
+  margin: -2px 0 8px;
+}
+
+.lj-os-settings-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 100%;
+}
+
+.lj-os-settings-primary-status {
+  margin-bottom: 6px;
+}
+
+.lj-os-settings-secondary-status {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.lj-os-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lj-os-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.lj-os-settings-row-label {
+  font-weight: 500;
+}
+
+.lj-os-settings-row-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.lj-os-settings-reset-row {
+  margin-top: 10px;
+}
+
+.lj-os-settings-details {
+  margin: 0;
+}

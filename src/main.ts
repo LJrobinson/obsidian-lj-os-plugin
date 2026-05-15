@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, requestUrl } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, activeDocument, normalizePath, requestUrl } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
 import { execFile } from "child_process";
@@ -15,8 +15,11 @@ const ACTIVITY_WEATHER_CACHE_MS = 30 * 60 * 1000;
 const ACTIVITY_WEATHER_FETCH_TIMEOUT_MS = 2500;
 const DEFAULT_DISCOVERY_DEPTH = 3;
 const DEFAULT_DISCOVERY_MAX_DIRECTORIES = 2000;
-const DEFAULT_SECTION_ORDER = ["activityBar", "gitScoreboard", "repositoryActivity", "cleanupChecklist"];
-const DASHBOARD_SECTIONS = [
+const SCAN_TRIGGERS = ["startup", "interval", "view-open", "manual"] as const;
+type ScanTrigger = (typeof SCAN_TRIGGERS)[number];
+type DashboardSectionId = "activityBar" | "gitScoreboard" | "repositoryActivity" | "cleanupChecklist";
+const DEFAULT_SECTION_ORDER: DashboardSectionId[] = ["activityBar", "gitScoreboard", "repositoryActivity", "cleanupChecklist"];
+const DASHBOARD_SECTIONS: Array<{ id: DashboardSectionId; label: string }> = [
   { id: "activityBar", label: "Activity Bar" },
   { id: "gitScoreboard", label: "Git Scoreboard" },
   { id: "repositoryActivity", label: "Repository Activity" },
@@ -49,9 +52,8 @@ const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "system volume information",
 ]);
 
-type DashboardSectionId = "activityBar" | "gitScoreboard" | "repositoryActivity" | "cleanupChecklist";
-type ScanTrigger = "startup" | "interval" | "view-open" | "manual";
 type UnknownRecord = Record<string, unknown>;
+type AsyncAction = () => void | PromiseLike<unknown>;
 
 interface ScanState {
   isScanRunning: boolean;
@@ -126,7 +128,7 @@ interface LjOsSettings extends UnknownRecord {
 }
 
 interface ScanOptions {
-  trigger?: ScanTrigger | string;
+  trigger?: ScanTrigger;
   showNotice?: boolean;
   maxDurationSeconds?: number;
   context?: ScanBudgetContext;
@@ -249,8 +251,8 @@ function coerceSettings(savedSettings: UnknownRecord): LjOsSettings {
   return settings;
 }
 
-function runAsync(action: () => Promise<unknown>): void {
-  void action().catch((error: unknown) => console.error("LJ OS async action failed", error));
+function runAsync(action: () => PromiseLike<unknown>): void {
+  void Promise.resolve(action()).catch((error: unknown) => console.error("LJ OS async action failed", error));
 }
 
 export default class LjOsPlugin extends Plugin {
@@ -666,7 +668,7 @@ export default class LjOsPlugin extends Plugin {
       try {
         const content = await this.app.vault.cachedRead(file);
         isLjOsView = findSectionRanges(content, this.settings.dailySectionHeading).length > 0;
-      } catch (error) {
+      } catch {
         return;
       }
     }
@@ -679,7 +681,7 @@ export default class LjOsPlugin extends Plugin {
     this.scheduleBackgroundScan("view-open");
   }
 
-  scheduleBackgroundScan(trigger: ScanTrigger | string) {
+  scheduleBackgroundScan(trigger: ScanTrigger) {
     const timeoutId = window.setTimeout(() => {
       runAsync(() => this.scanTodaysGitSheet({ trigger }));
     }, 250);
@@ -1267,14 +1269,14 @@ class LjOsSettingTab extends PluginSettingTab {
 function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots: string[], trackedRepoPaths: string[]) {
   const hasTrackedRepos = trackedRepoPaths.length > 0;
   const panel = createCompactPanel(containerEl, hasTrackedRepos ? "Setup Complete ☑️" : "Git Started");
-  const copy = document.createElement("p");
+  const copy = activeDocument.createElement("p");
   copy.textContent = hasTrackedRepos
     ? `LJ OS is tracking ${trackedRepoPaths.length} repos. It will keep cached Git Wall data fresh in the background.`
     : "Point LJ OS at the folders or drives where your Git repos live. LJ OS will discover repos, track the ones you enable, then keep your Git Wall updated automatically.";
   panel.appendChild(copy);
 
   if (!hasTrackedRepos) {
-    const steps = document.createElement("ol");
+    const steps = activeDocument.createElement("ol");
     for (const step of [
       "Add scan roots or exact repo paths.",
       "Discover repositories.",
@@ -1282,19 +1284,19 @@ function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots
       "Enable automation.",
       "Run first scan.",
     ]) {
-      const item = document.createElement("li");
+      const item = activeDocument.createElement("li");
       item.textContent = step;
       steps.appendChild(item);
     }
     panel.appendChild(steps);
   }
 
-  const hint = document.createElement("p");
+  const hint = activeDocument.createElement("p");
   hint.textContent = "Fastest setup: add your main repo folder or drive, click Discover repositories, then click Scan now.";
   hint.addClass("lj-os-settings-no-margin-bottom");
   panel.appendChild(hint);
 
-  const actions = document.createElement("div");
+  const actions = activeDocument.createElement("div");
   actions.addClass("lj-os-settings-actions");
   panel.appendChild(actions);
 
@@ -1305,7 +1307,7 @@ function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots
   }
 
   if (scanRoots.length > 0 || trackedRepoPaths.length > 0) {
-    const counts = document.createElement("p");
+    const counts = activeDocument.createElement("p");
     counts.textContent = `${scanRoots.length} scan roots · ${trackedRepoPaths.length} tracked repos`;
     counts.addClass("lj-os-settings-muted");
     counts.addClass("lj-os-settings-counts");
@@ -1315,13 +1317,13 @@ function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots
 
 function renderFullWidthPathTextareaSetting(containerEl: HTMLElement, options: PathTextareaOptions) {
   const panel = createCompactPanel(containerEl, options.label);
-  const description = document.createElement("div");
+  const description = activeDocument.createElement("div");
   description.textContent = options.description;
   description.addClass("lj-os-settings-muted");
   description.addClass("lj-os-settings-description");
   panel.appendChild(description);
 
-  const textarea = document.createElement("textarea");
+  const textarea = activeDocument.createElement("textarea");
   textarea.rows = options.rows;
   textarea.placeholder = options.placeholder;
   textarea.value = options.value;
@@ -1335,7 +1337,7 @@ function renderFullWidthPathTextareaSetting(containerEl: HTMLElement, options: P
 function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, trackedRepoPaths: string[]) {
   const state = plugin.scanState;
   const panel = createCompactPanel(containerEl, "Scan Status");
-  const primary = document.createElement("p");
+  const primary = activeDocument.createElement("p");
   const lastScan = formatTimestampForSettings(state.lastSuccessfulScanCompletedAt || state.lastScanCompletedAt);
   const duration = formatScanStateDuration(state);
   const status = formatScanStatusLabel(state.lastScanStatus);
@@ -1353,7 +1355,7 @@ function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, t
   primary.addClass("lj-os-settings-primary-status");
   panel.appendChild(primary);
 
-  const secondary = document.createElement("p");
+  const secondary = activeDocument.createElement("p");
   const failedCount = toNumber(state.lastFailedRepoCount);
   const skippedCount = toNumber(state.lastSkippedRepoCount);
   const trigger = formatScalar(state.lastScanTrigger);
@@ -1376,22 +1378,22 @@ function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, t
 function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) {
   const order = normalizeSectionOrder(plugin.settings.sectionOrder);
   const panel = createCompactPanel(containerEl, "Section order");
-  const list = document.createElement("div");
+  const list = activeDocument.createElement("div");
   list.addClass("lj-os-settings-list");
   panel.appendChild(list);
 
   order.forEach((sectionId, index) => {
     const section = getDashboardSection(sectionId);
-    const row = document.createElement("div");
+    const row = activeDocument.createElement("div");
     row.addClass("lj-os-settings-row");
     list.appendChild(row);
 
-    const label = document.createElement("div");
+    const label = activeDocument.createElement("div");
     label.textContent = `${index + 1}. ${section.label}`;
     label.addClass("lj-os-settings-row-label");
     row.appendChild(label);
 
-    const actions = document.createElement("div");
+    const actions = activeDocument.createElement("div");
     actions.addClass("lj-os-settings-row-actions");
     row.appendChild(actions);
 
@@ -1420,7 +1422,7 @@ function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) 
     actions.appendChild(moveDownButton);
   });
 
-  const resetRow = document.createElement("div");
+  const resetRow = activeDocument.createElement("div");
   resetRow.addClass("lj-os-settings-reset-row");
   resetRow.appendChild(
     createActionButton(
@@ -1438,17 +1440,17 @@ function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) 
 
 function renderAdvancedScanningDetails(containerEl: HTMLElement) {
   const panel = createCompactPanel(containerEl, "Discovery Details");
-  const details = document.createElement("p");
+  const details = activeDocument.createElement("p");
   details.textContent = `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, the vault config folder, Git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`;
   details.addClass("lj-os-settings-details");
   panel.appendChild(details);
 }
 
 function createCompactPanel(containerEl: HTMLElement, title: string): HTMLElement {
-  const panel = document.createElement("div");
+  const panel = activeDocument.createElement("div");
   panel.addClass("lj-os-settings-card");
 
-  const heading = document.createElement("div");
+  const heading = activeDocument.createElement("div");
   heading.textContent = title;
   heading.addClass("lj-os-settings-card-heading");
   panel.appendChild(heading);
@@ -1456,8 +1458,8 @@ function createCompactPanel(containerEl: HTMLElement, title: string): HTMLElemen
   return panel;
 }
 
-function createActionButton(label: string, onClick: () => unknown | Promise<unknown>, isPrimary: boolean): HTMLButtonElement {
-  const button = document.createElement("button");
+function createActionButton(label: string, onClick: AsyncAction, isPrimary: boolean): HTMLButtonElement {
+  const button = activeDocument.createElement("button");
   button.type = "button";
   button.textContent = label;
   if (isPrimary) {
@@ -1763,7 +1765,7 @@ async function fetchOpenMeteoActivityWeatherContext(request: ActivityWeatherRequ
       source: "open-meteo",
       fetchedAt: new Date().toISOString(),
     };
-  } catch (error) {
+  } catch {
     return null;
   }
 }
@@ -1841,7 +1843,7 @@ function getExtremeActivityTemperatureContext(temperatureC) {
 }
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, toNumber(ms))));
+  return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, toNumber(ms))));
 }
 
 function renderDailyActivityBlocks(timestamps) {
@@ -1989,7 +1991,7 @@ function getApproximateMoonPhaseEmoji(date = new Date()) {
     const cyclePosition = ((daysSinceKnownNewMoon % LUNAR_CYCLE_DAYS) + LUNAR_CYCLE_DAYS) % LUNAR_CYCLE_DAYS;
     const phaseIndex = Math.floor(((cyclePosition / LUNAR_CYCLE_DAYS) * MOON_PHASE_EMOJIS.length) + 0.5) % MOON_PHASE_EMOJIS.length;
     return MOON_PHASE_EMOJIS[phaseIndex] || "";
-  } catch (error) {
+  } catch {
     return "";
   }
 }
@@ -2681,7 +2683,7 @@ function isScanTimeoutError(error) {
 }
 
 function normalizeScanTrigger(value) {
-  return ["startup", "interval", "view-open", "manual"].includes(value) ? value : "manual";
+  return SCAN_TRIGGERS.includes(value) ? value : "manual";
 }
 
 function normalizeAutoScanIntervalMinutes(value) {
@@ -2876,7 +2878,7 @@ function discoverGitRepositories(scanRoots: unknown, options: DiscoveryOptions =
       let entries;
       try {
         entries = fs.readdirSync(current.folderPath, { withFileTypes: true });
-      } catch (error) {
+      } catch {
         warnings.push(`${formatLocalPath(current.folderPath)} could not be searched.`);
         continue;
       }
@@ -2932,7 +2934,7 @@ function hasGitMetadata(repoPath) {
   try {
     const stats = fs.statSync(path.join(repoPath, ".git"));
     return stats.isDirectory() || stats.isFile();
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -3004,7 +3006,7 @@ function normalizeLocalPath(value: unknown): string {
 
   try {
     return path.resolve(text);
-  } catch (error) {
+  } catch {
     return text;
   }
 }
@@ -3013,7 +3015,7 @@ function validateLocalDirectory(repoPath: string): string {
   try {
     const stats = fs.statSync(repoPath);
     return stats.isDirectory() ? "" : "Path is not a folder.";
-  } catch (error) {
+  } catch {
     return "Path does not exist or cannot be read.";
   }
 }

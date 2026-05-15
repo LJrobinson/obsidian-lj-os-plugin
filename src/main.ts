@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, requestUrl } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, normalizePath, requestUrl } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
 import { execFile } from "child_process";
@@ -40,7 +40,6 @@ const LUNAR_CYCLE_DAYS = 29.530588853;
 const KNOWN_NEW_MOON_UTC_MS = Date.UTC(2000, 0, 6, 18, 14);
 const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "node_modules",
-  ".obsidian",
   ".git",
   "appdata",
   "windows",
@@ -50,7 +49,135 @@ const DISCOVERY_SKIP_FOLDER_NAMES = new Set([
   "system volume information",
 ]);
 
-const DEFAULT_SETTINGS = {
+type DashboardSectionId = "activityBar" | "gitScoreboard" | "repositoryActivity" | "cleanupChecklist";
+type ScanTrigger = "startup" | "interval" | "view-open" | "manual";
+type UnknownRecord = Record<string, unknown>;
+
+interface ScanState {
+  isScanRunning: boolean;
+  lastScanStartedAt: string;
+  lastScanCompletedAt: string;
+  lastSuccessfulScanCompletedAt: string;
+  lastScanDurationMs: number;
+  lastScanTrigger: string;
+  lastRepoCount: number;
+  lastScannedRepoCount: number;
+  lastSkippedRepoCount: number;
+  lastFailedRepoCount: number;
+  lastScanTimedOut: boolean;
+  lastScanStatus: string;
+}
+
+interface ActivityWeatherContext {
+  emoji: string;
+  label: string;
+  source?: string;
+  fetchedAt?: string;
+}
+
+interface ActivityWeatherRequest {
+  latitude: number;
+  longitude: number;
+  key: string;
+}
+
+interface ActivityWeatherCache {
+  key: string;
+  fetchedAtMs: number;
+  context: ActivityWeatherContext | null;
+}
+
+interface LjOsSettings extends UnknownRecord {
+  dynoSheetFolder: string;
+  dynaSheetFolder?: string;
+  gitSheetFolder?: string;
+  dailyNoteFolder: string;
+  repoPaths: string[];
+  scanRoots: string[];
+  trackedRepoPaths: string[];
+  scanOnStartup: boolean;
+  autoScanEnabled: boolean;
+  autoScanIntervalMinutes: number;
+  scanOnViewOpen: boolean;
+  maxScanDurationSeconds: number;
+  dailySectionHeading: string;
+  summaryTitle: string;
+  repoSectionTitle: string;
+  tidySectionTitle: string;
+  useEmoji: boolean;
+  showSummary: boolean;
+  summaryStyle: string;
+  showRepoTable: boolean;
+  repoView: string;
+  showTidyQueue: boolean;
+  tidyView: string;
+  tableFormat: string;
+  showDailyActivityBar: boolean;
+  showActivityWeatherIcon: boolean;
+  activityWeatherLatitude: string;
+  activityWeatherLongitude: string;
+  showActivityMoonIcon: boolean;
+  showThreeDayActivity: boolean;
+  showSevenDayActivity: boolean;
+  sectionOrder: string[];
+  showAdvancedSettings: boolean;
+  showAdvancedScanningSettings: boolean;
+  scanState?: ScanState;
+}
+
+interface ScanOptions {
+  trigger?: ScanTrigger | string;
+  showNotice?: boolean;
+  maxDurationSeconds?: number;
+  context?: ScanBudgetContext;
+}
+
+interface ScanBudgetContext {
+  scanStartedAtMs: number;
+  deadlineMs: number;
+  currentRepoDeadlineMs: number | null;
+  timedOut: boolean;
+  warnings: string[];
+}
+
+interface DiscoveryOptions {
+  maxDepth?: number;
+  maxDurationSeconds?: number;
+  configDir?: string;
+}
+
+interface DiscoveryResult {
+  repositories: string[];
+  warnings: string[];
+}
+
+interface ConfiguredPaths {
+  scanRoots: string[];
+  trackedRepoPaths: string[];
+}
+
+interface GitSheetMetadata {
+  scanCompletedAt: string;
+  durationMs: number;
+  repoCount: number;
+  scannedRepoCount: number;
+  skippedRepoCount: number;
+  failedRepoCount: number;
+  timedOut: boolean;
+  scanTrigger: string;
+  warnings: unknown[];
+}
+
+interface PathTextareaOptions {
+  label: string;
+  description: string;
+  placeholder: string;
+  rows: number;
+  value: string;
+  onChange: (value: string) => Promise<unknown>;
+}
+
+const DEFAULT_SETTINGS: LjOsSettings = {
   dynoSheetFolder: "LJ OS/stats",
   dailyNoteFolder: "Daily Notes",
   repoPaths: [],
@@ -85,8 +212,57 @@ const DEFAULT_SETTINGS = {
   showAdvancedScanningSettings: false,
 };
 
+function isRecord(value: unknown): value is UnknownRecord {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function toRecord(value: unknown): UnknownRecord {
+  return isRecord(value) ? value : {};
+}
+
+function coerceSettings(savedSettings: UnknownRecord): LjOsSettings {
+  const settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings) as LjOsSettings;
+
+  settings.dynoSheetFolder = formatScalar(settings.dynoSheetFolder);
+  settings.dailyNoteFolder = formatScalar(settings.dailyNoteFolder);
+
+  if (hasOwn(savedSettings, "gitSheetFolder") && !hasOwn(savedSettings, "dynoSheetFolder")) {
+    settings.dynoSheetFolder = formatScalar(savedSettings.gitSheetFolder);
+  }
+
+  const migratedPaths = migrateConfiguredPaths(savedSettings);
+  settings.scanRoots = migratedPaths.scanRoots;
+  settings.trackedRepoPaths = migratedPaths.trackedRepoPaths;
+  settings.repoPaths = [];
+  settings.autoScanIntervalMinutes = normalizeAutoScanIntervalMinutes(settings.autoScanIntervalMinutes);
+  settings.maxScanDurationSeconds = normalizeMaxScanDurationSeconds(
+    hasOwn(savedSettings, "maxScanDurationSeconds") ? savedSettings.maxScanDurationSeconds : DEFAULT_MAX_SCAN_DURATION_SECONDS
+  );
+  settings.scanOnStartup = savedSettings.scanOnStartup !== false;
+  settings.autoScanEnabled = savedSettings.autoScanEnabled !== false;
+  settings.scanOnViewOpen = savedSettings.scanOnViewOpen !== false;
+  settings.showAdvancedScanningSettings = savedSettings.showAdvancedScanningSettings === true;
+  settings.activityWeatherLatitude = sanitizeCoordinateSetting(settings.activityWeatherLatitude);
+  settings.activityWeatherLongitude = sanitizeCoordinateSetting(settings.activityWeatherLongitude);
+  settings.sectionOrder = normalizeSectionOrder(settings.sectionOrder);
+
+  return settings;
+}
+
+function runAsync(action: () => Promise<unknown>): void {
+  void action().catch((error: unknown) => console.error("LJ OS async action failed", error));
+}
+
 export default class LjOsPlugin extends Plugin {
-  [key: string]: any;
+  settings: LjOsSettings;
+  scanState: ScanState;
+  settingTab: LjOsSettingTab | null;
+  autoScanIntervalId: number | null;
+  activityWeatherCache: ActivityWeatherCache | null;
+  startupScanTimeoutId: number | null;
+  lastViewOpenScanRequestedAt: number;
+  suppressViewOpenScanUntil: number;
+
   async onload() {
     this.autoScanIntervalId = null;
     this.activityWeatherCache = null;
@@ -99,19 +275,25 @@ export default class LjOsPlugin extends Plugin {
     this.addCommand({
       id: "insert-todays-git-sheet",
       name: "Insert Today's Git Wall",
-      callback: () => this.insertTodaysGitSheet(),
+      callback: () => {
+        runAsync(() => this.insertTodaysGitSheet());
+      },
     });
 
     this.addCommand({
       id: "scan-configured-git-repositories",
       name: "Scan Configured Git Repositories",
-      callback: () => this.scanTodaysGitSheet({ showNotice: true }),
+      callback: () => {
+        runAsync(() => this.scanTodaysGitSheet({ showNotice: true }));
+      },
     });
 
     this.addCommand({
       id: "discover-git-repositories",
       name: "Discover Repositories",
-      callback: () => this.discoverRepositories({ showNotice: true }),
+      callback: () => {
+        runAsync(() => this.discoverRepositories({ showNotice: true }));
+      },
     });
 
     this.settingTab = new LjOsSettingTab(this.app, this);
@@ -122,33 +304,14 @@ export default class LjOsPlugin extends Plugin {
   }
 
   async loadSettings() {
-    const savedSettings = (await this.loadData()) || {};
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
-
-    if (hasOwn(savedSettings, "gitSheetFolder") && !hasOwn(savedSettings, "dynoSheetFolder")) {
-      this.settings.dynoSheetFolder = savedSettings.gitSheetFolder;
-    }
-
-    const migratedPaths = migrateConfiguredPaths(savedSettings);
-    this.settings.scanRoots = migratedPaths.scanRoots;
-    this.settings.trackedRepoPaths = migratedPaths.trackedRepoPaths;
-    this.settings.repoPaths = [];
-    this.settings.autoScanIntervalMinutes = normalizeAutoScanIntervalMinutes(this.settings.autoScanIntervalMinutes);
-    this.settings.maxScanDurationSeconds = normalizeMaxScanDurationSeconds(
-      hasOwn(savedSettings, "maxScanDurationSeconds") ? savedSettings.maxScanDurationSeconds : DEFAULT_MAX_SCAN_DURATION_SECONDS
-    );
-    this.settings.scanOnStartup = savedSettings.scanOnStartup !== false;
-    this.settings.autoScanEnabled = savedSettings.autoScanEnabled !== false;
-    this.settings.scanOnViewOpen = savedSettings.scanOnViewOpen !== false;
-    this.settings.showAdvancedScanningSettings = savedSettings.showAdvancedScanningSettings === true;
-    this.settings.activityWeatherLatitude = sanitizeCoordinateSetting(this.settings.activityWeatherLatitude);
-    this.settings.activityWeatherLongitude = sanitizeCoordinateSetting(this.settings.activityWeatherLongitude);
-    this.settings.sectionOrder = normalizeSectionOrder(this.settings.sectionOrder);
+    const savedSettings = toRecord(await this.loadData());
+    this.settings = coerceSettings(savedSettings);
     this.scanState = normalizeScanState(savedSettings.scanState);
     if (this.scanState.isScanRunning) {
       this.scanState.lastScanStatus = "interrupted: previous scan did not finish";
     }
     this.scanState.isScanRunning = false;
+    this.settings.scanState = this.scanState;
   }
 
   async saveSettings() {
@@ -160,7 +323,7 @@ export default class LjOsPlugin extends Plugin {
     return formatLocalDateStamp(new Date());
   }
 
-  getGitSheetPathForDate(dateStamp) {
+  getGitSheetPathForDate(dateStamp: unknown): string {
     return joinVaultPath(this.settings.dynoSheetFolder, `${formatScalar(dateStamp)}.json`);
   }
 
@@ -172,7 +335,7 @@ export default class LjOsPlugin extends Plugin {
     return joinVaultPath(this.settings.dailyNoteFolder, `${this.getTodayStamp()}.md`);
   }
 
-  async scanTodaysGitSheet(options = {}) {
+  async scanTodaysGitSheet(options: ScanOptions = {}) {
     const trigger = normalizeScanTrigger(options.trigger || "manual");
     const isAutomatic = trigger !== "manual";
     const repoPaths = normalizeRepoPaths(this.settings.trackedRepoPaths);
@@ -329,7 +492,7 @@ export default class LjOsPlugin extends Plugin {
     return this.readGitSheetForDate(this.getTodayStamp());
   }
 
-  async readGitSheetForDate(dateStamp) {
+  async readGitSheetForDate(dateStamp: unknown): Promise<UnknownRecord | null> {
     const gitSheetPath = this.getGitSheetPathForDate(dateStamp);
     const gitSheetFile = this.app.vault.getAbstractFileByPath(gitSheetPath);
 
@@ -338,8 +501,8 @@ export default class LjOsPlugin extends Plugin {
     }
 
     try {
-      const gitSheet = JSON.parse(await this.app.vault.read(gitSheetFile));
-      return gitSheet && typeof gitSheet === "object" ? gitSheet : null;
+      const gitSheet: unknown = JSON.parse(await this.app.vault.read(gitSheetFile));
+      return isRecord(gitSheet) ? gitSheet : null;
     } catch (error) {
       console.error("Failed to parse existing LJ OS Git Wall JSON", error);
       return null;
@@ -357,8 +520,8 @@ export default class LjOsPlugin extends Plugin {
     return entries;
   }
 
-  async addActivityWeatherToGitSheet(gitSheet) {
-    if (!gitSheet || typeof gitSheet !== "object") {
+  async addActivityWeatherToGitSheet(gitSheet: unknown) {
+    if (!isRecord(gitSheet)) {
       return;
     }
 
@@ -401,7 +564,7 @@ export default class LjOsPlugin extends Plugin {
     return context;
   }
 
-  async discoverRepositories(options = {}) {
+  async discoverRepositories(options: ScanOptions = {}) {
     const scanRoots = normalizeRepoPaths(this.settings.scanRoots);
 
     if (scanRoots.length === 0) {
@@ -415,6 +578,7 @@ export default class LjOsPlugin extends Plugin {
     const discovery = discoverGitRepositories(scanRoots, {
       maxDepth: DEFAULT_DISCOVERY_DEPTH,
       maxDurationSeconds: this.settings.maxScanDurationSeconds,
+      configDir: this.app.vault.configDir,
     });
     const beforeCount = normalizeRepoPaths(this.settings.trackedRepoPaths).length;
     this.settings.trackedRepoPaths = mergeUniquePaths(this.settings.trackedRepoPaths, discovery.repositories);
@@ -443,7 +607,7 @@ export default class LjOsPlugin extends Plugin {
 
     const intervalMs = normalizeAutoScanIntervalMinutes(this.settings.autoScanIntervalMinutes) * 60 * 1000;
     this.autoScanIntervalId = window.setInterval(() => {
-      this.scanTodaysGitSheet({ trigger: "interval" });
+      runAsync(() => this.scanTodaysGitSheet({ trigger: "interval" }));
     }, intervalMs);
     this.registerInterval(this.autoScanIntervalId);
   }
@@ -464,7 +628,7 @@ export default class LjOsPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       this.startupScanTimeoutId = window.setTimeout(() => {
-        this.scanTodaysGitSheet({ trigger: "startup" });
+        runAsync(() => this.scanTodaysGitSheet({ trigger: "startup" }));
       }, 1000);
       this.register(() => window.clearTimeout(this.startupScanTimeoutId));
     });
@@ -473,12 +637,12 @@ export default class LjOsPlugin extends Plugin {
   registerViewOpenScanHandler() {
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        this.maybeScanOnViewOpen(file);
+        runAsync(() => this.maybeScanOnViewOpen(file));
       })
     );
   }
 
-  async maybeScanOnViewOpen(file) {
+  async maybeScanOnViewOpen(file: unknown) {
     if (this.settings.scanOnViewOpen === false || !(file instanceof TFile) || file.extension !== "md") {
       return;
     }
@@ -515,9 +679,9 @@ export default class LjOsPlugin extends Plugin {
     this.scheduleBackgroundScan("view-open");
   }
 
-  scheduleBackgroundScan(trigger) {
+  scheduleBackgroundScan(trigger: ScanTrigger | string) {
     const timeoutId = window.setTimeout(() => {
-      this.scanTodaysGitSheet({ trigger }).catch((error) => console.error("LJ OS background scan failed", error));
+      runAsync(() => this.scanTodaysGitSheet({ trigger }));
     }, 250);
 
     this.register(() => window.clearTimeout(timeoutId));
@@ -544,13 +708,13 @@ export default class LjOsPlugin extends Plugin {
     ) * 60 * 1000;
   }
 
-  wasScanCompletedRecently(thresholdMs) {
+  wasScanCompletedRecently(thresholdMs: number): boolean {
     const completedAt = this.scanState.lastScanCompletedAt;
     const completedMs = Date.parse(completedAt || "");
     return Number.isFinite(completedMs) && Date.now() - completedMs < thresholdMs;
   }
 
-  completeScanState(gitSheet, startedAtMs) {
+  completeScanState(gitSheet: unknown, startedAtMs: number) {
     const metadata = getGitSheetMetadata(gitSheet);
     const status = formatCompletedScanStatus(metadata);
 
@@ -569,10 +733,10 @@ export default class LjOsPlugin extends Plugin {
     });
   }
 
-  updateScanState(patch) {
+  updateScanState(patch: Partial<ScanState>) {
     this.scanState = normalizeScanState(Object.assign({}, this.scanState, patch));
     this.settings.scanState = this.scanState;
-    this.saveData(this.settings).catch((error) => console.error("Failed to save LJ OS scan state", error));
+    void this.saveData(this.settings).catch((error) => console.error("Failed to save LJ OS scan state", error));
     this.refreshSettingsDisplay();
   }
 
@@ -586,7 +750,9 @@ export default class LjOsPlugin extends Plugin {
 };
 
 class LjOsSettingTab extends PluginSettingTab {
-  constructor(app, plugin) {
+  plugin: LjOsPlugin;
+
+  constructor(app: App, plugin: LjOsPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -621,9 +787,11 @@ class LjOsSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.dynoSheetFolder)
           .setValue(this.plugin.settings.dynoSheetFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.dynoSheetFolder = sanitizeFolderSetting(value, DEFAULT_SETTINGS.dynoSheetFolder);
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.dynoSheetFolder = sanitizeFolderSetting(value, DEFAULT_SETTINGS.dynoSheetFolder);
+              await this.plugin.saveSettings();
+            });
           })
       );
 
@@ -634,9 +802,11 @@ class LjOsSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.dailyNoteFolder)
           .setValue(this.plugin.settings.dailyNoteFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.dailyNoteFolder = sanitizeFolderSetting(value, DEFAULT_SETTINGS.dailyNoteFolder);
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.dailyNoteFolder = sanitizeFolderSetting(value, DEFAULT_SETTINGS.dailyNoteFolder);
+              await this.plugin.saveSettings();
+            });
           })
       );
 
@@ -662,9 +832,11 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Scan on startup")
       .setDesc("Quietly scan enabled tracked repos shortly after Obsidian finishes loading.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.scanOnStartup !== false).onChange(async (value) => {
-          this.plugin.settings.scanOnStartup = value;
-          await this.plugin.saveSettings();
+        toggle.setValue(this.plugin.settings.scanOnStartup !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.scanOnStartup = value;
+            await this.plugin.saveSettings();
+          });
         })
       );
 
@@ -672,11 +844,13 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Auto-scan while Obsidian is open")
       .setDesc("Run quiet interval scans in the background. Manual scan remains available as a fallback.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.autoScanEnabled !== false).onChange(async (value) => {
-          this.plugin.settings.autoScanEnabled = value;
-          await this.plugin.saveSettings();
-          this.plugin.setupAutoScanTimer();
-          this.display();
+        toggle.setValue(this.plugin.settings.autoScanEnabled !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.autoScanEnabled = value;
+            await this.plugin.saveSettings();
+            this.plugin.setupAutoScanTimer();
+            this.display();
+          });
         })
       );
 
@@ -688,10 +862,12 @@ class LjOsSettingTab extends PluginSettingTab {
           text
             .setPlaceholder(String(DEFAULT_SETTINGS.autoScanIntervalMinutes))
             .setValue(String(normalizeAutoScanIntervalMinutes(this.plugin.settings.autoScanIntervalMinutes)))
-            .onChange(async (value) => {
-              this.plugin.settings.autoScanIntervalMinutes = normalizeAutoScanIntervalMinutes(value);
-              await this.plugin.saveSettings();
-              this.plugin.setupAutoScanTimer();
+            .onChange((value) => {
+              runAsync(async () => {
+                this.plugin.settings.autoScanIntervalMinutes = normalizeAutoScanIntervalMinutes(value);
+                await this.plugin.saveSettings();
+                this.plugin.setupAutoScanTimer();
+              });
             })
         );
     }
@@ -700,9 +876,11 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Refresh in background when view opens")
       .setDesc("Shows cached data immediately, then quietly refreshes scan data in the background.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.scanOnViewOpen !== false).onChange(async (value) => {
-          this.plugin.settings.scanOnViewOpen = value;
-          await this.plugin.saveSettings();
+        toggle.setValue(this.plugin.settings.scanOnViewOpen !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.scanOnViewOpen = value;
+            await this.plugin.saveSettings();
+          });
         })
       );
 
@@ -710,8 +888,8 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Scan repositories now")
       .setDesc("Runs a scan now. Normally LJ OS updates automatically in the background.")
       .addButton((button) =>
-        button.setButtonText("Scan now").setCta().onClick(async () => {
-          await this.plugin.scanTodaysGitSheet({ trigger: "manual", showNotice: true });
+        button.setButtonText("Scan now").setCta().onClick(() => {
+          runAsync(() => this.plugin.scanTodaysGitSheet({ trigger: "manual", showNotice: true }));
         })
       );
 
@@ -725,9 +903,11 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Use emoji")
       .setDesc("Emoji mode affects rendered output only. It does not rewrite saved title fields.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.useEmoji !== false).onChange(async (value) => {
-          this.plugin.settings.useEmoji = value;
-          await this.plugin.saveSettings();
+        toggle.setValue(this.plugin.settings.useEmoji !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.useEmoji = value;
+            await this.plugin.saveSettings();
+          });
         })
       );
 
@@ -735,10 +915,12 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Show daily activity bar")
       .setDesc("Show a compact timeline of when activity happened today.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showDailyActivityBar !== false).onChange(async (value) => {
-          this.plugin.settings.showDailyActivityBar = value;
-          await this.plugin.saveSettings();
-          this.display();
+        toggle.setValue(this.plugin.settings.showDailyActivityBar !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.showDailyActivityBar = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
 
@@ -747,11 +929,13 @@ class LjOsSettingTab extends PluginSettingTab {
         .setName("Show weather icon")
         .setDesc("Add a subtle weather emoji before the daily activity bar when weather data is available.")
         .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.showActivityWeatherIcon === true).onChange(async (value) => {
-            this.plugin.settings.showActivityWeatherIcon = value;
-            this.plugin.activityWeatherCache = null;
-            await this.plugin.saveSettings();
-            this.display();
+          toggle.setValue(this.plugin.settings.showActivityWeatherIcon === true).onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.showActivityWeatherIcon = value;
+              this.plugin.activityWeatherCache = null;
+              await this.plugin.saveSettings();
+              this.display();
+            });
           })
         );
 
@@ -763,10 +947,12 @@ class LjOsSettingTab extends PluginSettingTab {
             text
               .setPlaceholder("37.7749")
               .setValue(this.plugin.settings.activityWeatherLatitude)
-              .onChange(async (value) => {
-                this.plugin.settings.activityWeatherLatitude = sanitizeCoordinateSetting(value);
-                this.plugin.activityWeatherCache = null;
-                await this.plugin.saveSettings();
+              .onChange((value) => {
+                runAsync(async () => {
+                  this.plugin.settings.activityWeatherLatitude = sanitizeCoordinateSetting(value);
+                  this.plugin.activityWeatherCache = null;
+                  await this.plugin.saveSettings();
+                });
               })
           );
 
@@ -777,10 +963,12 @@ class LjOsSettingTab extends PluginSettingTab {
             text
               .setPlaceholder("-122.4194")
               .setValue(this.plugin.settings.activityWeatherLongitude)
-              .onChange(async (value) => {
-                this.plugin.settings.activityWeatherLongitude = sanitizeCoordinateSetting(value);
-                this.plugin.activityWeatherCache = null;
-                await this.plugin.saveSettings();
+              .onChange((value) => {
+                runAsync(async () => {
+                  this.plugin.settings.activityWeatherLongitude = sanitizeCoordinateSetting(value);
+                  this.plugin.activityWeatherCache = null;
+                  await this.plugin.saveSettings();
+                });
               })
           );
       }
@@ -789,9 +977,11 @@ class LjOsSettingTab extends PluginSettingTab {
         .setName("Show moon phase icon")
         .setDesc("Add a subtle moon phase emoji after the daily activity bar.")
         .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange(async (value) => {
-            this.plugin.settings.showActivityMoonIcon = value;
-            await this.plugin.saveSettings();
+          toggle.setValue(this.plugin.settings.showActivityMoonIcon === true).onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.showActivityMoonIcon = value;
+              await this.plugin.saveSettings();
+            });
           })
         );
 
@@ -799,13 +989,15 @@ class LjOsSettingTab extends PluginSettingTab {
         .setName("Show 3-day activity view")
         .setDesc("Show compact activity bars for the last 3 cached days.")
         .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.showThreeDayActivity === true).onChange(async (value) => {
-            this.plugin.settings.showThreeDayActivity = value;
-            if (value) {
-              this.plugin.settings.showSevenDayActivity = false;
-            }
-            await this.plugin.saveSettings();
-            this.display();
+          toggle.setValue(this.plugin.settings.showThreeDayActivity === true).onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.showThreeDayActivity = value;
+              if (value) {
+                this.plugin.settings.showSevenDayActivity = false;
+              }
+              await this.plugin.saveSettings();
+              this.display();
+            });
           })
         );
 
@@ -813,13 +1005,15 @@ class LjOsSettingTab extends PluginSettingTab {
         .setName("Show 7-day activity view")
         .setDesc("Show compact activity bars for the last 7 cached days.")
         .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange(async (value) => {
-            this.plugin.settings.showSevenDayActivity = value;
-            if (value) {
-              this.plugin.settings.showThreeDayActivity = false;
-            }
-            await this.plugin.saveSettings();
-            this.display();
+          toggle.setValue(this.plugin.settings.showSevenDayActivity === true).onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.showSevenDayActivity = value;
+              if (value) {
+                this.plugin.settings.showThreeDayActivity = false;
+              }
+              await this.plugin.saveSettings();
+              this.display();
+            });
           })
         );
     }
@@ -828,10 +1022,12 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Show summary section")
       .setDesc("Render the summary section.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showSummary !== false).onChange(async (value) => {
-          this.plugin.settings.showSummary = value;
-          await this.plugin.saveSettings();
-          this.display();
+        toggle.setValue(this.plugin.settings.showSummary !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.showSummary = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
 
@@ -845,9 +1041,11 @@ class LjOsSettingTab extends PluginSettingTab {
             .addOption("scoreboard", "Scoreboard")
             .addOption("pit-wall", "Pit Wall")
             .setValue(normalizeSummaryStyle(this.plugin.settings.summaryStyle))
-            .onChange(async (value) => {
-              this.plugin.settings.summaryStyle = normalizeSummaryStyle(value);
-              await this.plugin.saveSettings();
+            .onChange((value) => {
+              runAsync(async () => {
+                this.plugin.settings.summaryStyle = normalizeSummaryStyle(value);
+                await this.plugin.saveSettings();
+              });
             })
         );
     }
@@ -856,10 +1054,12 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Show repository section")
       .setDesc("Render the repository section.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showRepoTable !== false).onChange(async (value) => {
-          this.plugin.settings.showRepoTable = value;
-          await this.plugin.saveSettings();
-          this.display();
+        toggle.setValue(this.plugin.settings.showRepoTable !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.showRepoTable = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
 
@@ -874,10 +1074,12 @@ class LjOsSettingTab extends PluginSettingTab {
             .addOption("table", "Table")
             .addOption("status-cards", "Status Cards")
             .setValue(repoView)
-            .onChange(async (value) => {
-              this.plugin.settings.repoView = normalizeRepoView(value);
-              await this.plugin.saveSettings();
-              this.display();
+            .onChange((value) => {
+              runAsync(async () => {
+                this.plugin.settings.repoView = normalizeRepoView(value);
+                await this.plugin.saveSettings();
+                this.display();
+              });
             })
         );
 
@@ -892,9 +1094,11 @@ class LjOsSettingTab extends PluginSettingTab {
               .addOption("detailed", "Detailed")
               .addOption("emoji-board", "Emoji board")
               .setValue(normalizeTableFormat(this.plugin.settings.tableFormat))
-              .onChange(async (value) => {
-                this.plugin.settings.tableFormat = normalizeTableFormat(value);
-                await this.plugin.saveSettings();
+              .onChange((value) => {
+                runAsync(async () => {
+                  this.plugin.settings.tableFormat = normalizeTableFormat(value);
+                  await this.plugin.saveSettings();
+                });
               })
           );
       }
@@ -904,10 +1108,12 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Show tidy-up section")
       .setDesc("Render the tidy-up section.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showTidyQueue !== false).onChange(async (value) => {
-          this.plugin.settings.showTidyQueue = value;
-          await this.plugin.saveSettings();
-          this.display();
+        toggle.setValue(this.plugin.settings.showTidyQueue !== false).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.showTidyQueue = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
 
@@ -920,9 +1126,11 @@ class LjOsSettingTab extends PluginSettingTab {
             .addOption("queue", "Queue")
             .addOption("shutdown-checklist", "Shutdown Checklist")
             .setValue(normalizeTidyView(this.plugin.settings.tidyView))
-            .onChange(async (value) => {
-              this.plugin.settings.tidyView = normalizeTidyView(value);
-              await this.plugin.saveSettings();
+            .onChange((value) => {
+              runAsync(async () => {
+                this.plugin.settings.tidyView = normalizeTidyView(value);
+                await this.plugin.saveSettings();
+              });
             })
         );
     }
@@ -933,10 +1141,12 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Show label options")
       .setDesc("Show title and section-name fields.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showAdvancedSettings === true).onChange(async (value) => {
-          this.plugin.settings.showAdvancedSettings = value;
-          await this.plugin.saveSettings();
-          this.display();
+        toggle.setValue(this.plugin.settings.showAdvancedSettings === true).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.showAdvancedSettings = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
 
@@ -948,9 +1158,11 @@ class LjOsSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.dailySectionHeading)
           .setValue(this.plugin.settings.dailySectionHeading)
-          .onChange(async (value) => {
-            this.plugin.settings.dailySectionHeading = value.trim() || DEFAULT_SETTINGS.dailySectionHeading;
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.dailySectionHeading = value.trim() || DEFAULT_SETTINGS.dailySectionHeading;
+              await this.plugin.saveSettings();
+            });
           })
       );
 
@@ -961,9 +1173,11 @@ class LjOsSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.summaryTitle)
           .setValue(this.plugin.settings.summaryTitle)
-          .onChange(async (value) => {
-            this.plugin.settings.summaryTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.summaryTitle);
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.summaryTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.summaryTitle);
+              await this.plugin.saveSettings();
+            });
           })
       );
 
@@ -974,9 +1188,11 @@ class LjOsSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.repoSectionTitle)
           .setValue(this.plugin.settings.repoSectionTitle)
-          .onChange(async (value) => {
-            this.plugin.settings.repoSectionTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.repoSectionTitle);
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.repoSectionTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.repoSectionTitle);
+              await this.plugin.saveSettings();
+            });
           })
       );
 
@@ -987,9 +1203,11 @@ class LjOsSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.tidySectionTitle)
           .setValue(this.plugin.settings.tidySectionTitle)
-          .onChange(async (value) => {
-            this.plugin.settings.tidySectionTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.tidySectionTitle);
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            runAsync(async () => {
+              this.plugin.settings.tidySectionTitle = sanitizeTextSetting(value, DEFAULT_SETTINGS.tidySectionTitle);
+              await this.plugin.saveSettings();
+            });
           })
       );
 
@@ -997,13 +1215,15 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Reset labels")
       .setDesc("Restore the default Git Wall headings and titles.")
       .addButton((button) =>
-        button.setButtonText("Reset labels").setCta().onClick(async () => {
-          this.plugin.settings.dailySectionHeading = DEFAULT_SETTINGS.dailySectionHeading;
-          this.plugin.settings.summaryTitle = DEFAULT_SETTINGS.summaryTitle;
-          this.plugin.settings.repoSectionTitle = DEFAULT_SETTINGS.repoSectionTitle;
-          this.plugin.settings.tidySectionTitle = DEFAULT_SETTINGS.tidySectionTitle;
-          await this.plugin.saveSettings();
-          this.display();
+        button.setButtonText("Reset labels").setCta().onClick(() => {
+          runAsync(async () => {
+            this.plugin.settings.dailySectionHeading = DEFAULT_SETTINGS.dailySectionHeading;
+            this.plugin.settings.summaryTitle = DEFAULT_SETTINGS.summaryTitle;
+            this.plugin.settings.repoSectionTitle = DEFAULT_SETTINGS.repoSectionTitle;
+            this.plugin.settings.tidySectionTitle = DEFAULT_SETTINGS.tidySectionTitle;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
     }
@@ -1014,10 +1234,12 @@ class LjOsSettingTab extends PluginSettingTab {
       .setName("Show advanced scan options")
       .setDesc("Optional scan limits and discovery details.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.showAdvancedScanningSettings === true).onChange(async (value) => {
-          this.plugin.settings.showAdvancedScanningSettings = value;
-          await this.plugin.saveSettings();
-          this.display();
+        toggle.setValue(this.plugin.settings.showAdvancedScanningSettings === true).onChange((value) => {
+          runAsync(async () => {
+            this.plugin.settings.showAdvancedScanningSettings = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
         })
       );
 
@@ -1029,9 +1251,11 @@ class LjOsSettingTab extends PluginSettingTab {
           text
             .setPlaceholder(String(DEFAULT_SETTINGS.maxScanDurationSeconds))
             .setValue(String(normalizeMaxScanDurationSeconds(this.plugin.settings.maxScanDurationSeconds)))
-            .onChange(async (value) => {
-              this.plugin.settings.maxScanDurationSeconds = normalizeMaxScanDurationSeconds(value);
-              await this.plugin.saveSettings();
+            .onChange((value) => {
+              runAsync(async () => {
+                this.plugin.settings.maxScanDurationSeconds = normalizeMaxScanDurationSeconds(value);
+                await this.plugin.saveSettings();
+              });
             })
         );
 
@@ -1040,7 +1264,7 @@ class LjOsSettingTab extends PluginSettingTab {
   }
 }
 
-function renderSetupCard(containerEl, plugin, scanRoots, trackedRepoPaths) {
+function renderSetupCard(containerEl: HTMLElement, plugin: LjOsPlugin, scanRoots: string[], trackedRepoPaths: string[]) {
   const hasTrackedRepos = trackedRepoPaths.length > 0;
   const panel = createCompactPanel(containerEl, hasTrackedRepos ? "Setup Complete ☑️" : "Git Started");
   const copy = document.createElement("p");
@@ -1089,7 +1313,7 @@ function renderSetupCard(containerEl, plugin, scanRoots, trackedRepoPaths) {
   }
 }
 
-function renderFullWidthPathTextareaSetting(containerEl, options) {
+function renderFullWidthPathTextareaSetting(containerEl: HTMLElement, options: PathTextareaOptions) {
   const panel = createCompactPanel(containerEl, options.label);
   const description = document.createElement("div");
   description.textContent = options.description;
@@ -1102,14 +1326,14 @@ function renderFullWidthPathTextareaSetting(containerEl, options) {
   textarea.placeholder = options.placeholder;
   textarea.value = options.value;
   textarea.addClass("lj-os-settings-textarea");
-  textarea.addEventListener("change", async () => {
-    await options.onChange(textarea.value);
+  textarea.addEventListener("change", () => {
+    runAsync(() => options.onChange(textarea.value));
   });
   panel.appendChild(textarea);
 }
 
-function renderScanStatusSummary(containerEl, plugin, trackedRepoPaths) {
-  const state = plugin.scanState || {};
+function renderScanStatusSummary(containerEl: HTMLElement, plugin: LjOsPlugin, trackedRepoPaths: string[]) {
+  const state = plugin.scanState;
   const panel = createCompactPanel(containerEl, "Scan Status");
   const primary = document.createElement("p");
   const lastScan = formatTimestampForSettings(state.lastSuccessfulScanCompletedAt || state.lastScanCompletedAt);
@@ -1149,7 +1373,7 @@ function renderScanStatusSummary(containerEl, plugin, trackedRepoPaths) {
   panel.appendChild(secondary);
 }
 
-function renderSectionOrderEditor(containerEl, plugin) {
+function renderSectionOrderEditor(containerEl: HTMLElement, plugin: LjOsPlugin) {
   const order = normalizeSectionOrder(plugin.settings.sectionOrder);
   const panel = createCompactPanel(containerEl, "Section order");
   const list = document.createElement("div");
@@ -1212,15 +1436,15 @@ function renderSectionOrderEditor(containerEl, plugin) {
   panel.appendChild(resetRow);
 }
 
-function renderAdvancedScanningDetails(containerEl) {
+function renderAdvancedScanningDetails(containerEl: HTMLElement) {
   const panel = createCompactPanel(containerEl, "Discovery Details");
   const details = document.createElement("p");
-  details.textContent = `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, .obsidian, .git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`;
+  details.textContent = `Discovery searches scan roots up to ${DEFAULT_DISCOVERY_DEPTH} folders deep and stops after ${DEFAULT_DISCOVERY_MAX_DIRECTORIES} folders or the scan budget. It skips noisy folders such as node_modules, the vault config folder, Git internals, AppData, Windows, Program Files, $Recycle.Bin, and System Volume Information.`;
   details.addClass("lj-os-settings-details");
   panel.appendChild(details);
 }
 
-function createCompactPanel(containerEl, title) {
+function createCompactPanel(containerEl: HTMLElement, title: string): HTMLElement {
   const panel = document.createElement("div");
   panel.addClass("lj-os-settings-card");
 
@@ -1232,7 +1456,7 @@ function createCompactPanel(containerEl, title) {
   return panel;
 }
 
-function createActionButton(label, onClick, isPrimary) {
+function createActionButton(label: string, onClick: () => unknown | Promise<unknown>, isPrimary: boolean): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = label;
@@ -1240,7 +1464,7 @@ function createActionButton(label, onClick, isPrimary) {
     button.classList.add("mod-cta");
   }
   button.addEventListener("click", () => {
-    Promise.resolve(onClick()).catch((error) => console.error("LJ OS action failed", error));
+    void Promise.resolve(onClick()).catch((error) => console.error("LJ OS action failed", error));
   });
   return button;
 }
@@ -1462,7 +1686,7 @@ function renderRecentActivityTableLines(gitSheet, options = {}) {
   return lines;
 }
 
-function getActivityWeatherIcon(options = {}) {
+function getActivityWeatherIcon(options: UnknownRecord = {}) {
   if (options.showWeatherIcon !== true) {
     return null;
   }
@@ -1470,15 +1694,18 @@ function getActivityWeatherIcon(options = {}) {
   return formatScalar(options.weatherIcon) || null;
 }
 
-function getCachedActivityWeatherIcon(gitSheet) {
-  if (!gitSheet || typeof gitSheet !== "object" || !gitSheet.activityWeather || typeof gitSheet.activityWeather !== "object") {
+function getCachedActivityWeatherIcon(gitSheet: unknown): string | null {
+  const sheet = toRecord(gitSheet);
+  const activityWeather = toRecord(sheet.activityWeather);
+
+  if (!activityWeather) {
     return null;
   }
 
-  return formatScalar(gitSheet.activityWeather.emoji) || null;
+  return formatScalar(activityWeather.emoji) || null;
 }
 
-function normalizeActivityWeatherRequest(settings = {}) {
+function normalizeActivityWeatherRequest(settings: Partial<LjOsSettings> = {}): ActivityWeatherRequest | null {
   if (settings.showDailyActivityBar === false || settings.showActivityWeatherIcon !== true) {
     return null;
   }
@@ -1504,7 +1731,7 @@ function normalizeActivityWeatherRequest(settings = {}) {
   };
 }
 
-async function fetchOpenMeteoActivityWeatherContext(request) {
+async function fetchOpenMeteoActivityWeatherContext(request: ActivityWeatherRequest | null): Promise<ActivityWeatherContext | null> {
   if (!request || typeof requestUrl !== "function") {
     return null;
   }
@@ -1522,8 +1749,8 @@ async function fetchOpenMeteoActivityWeatherContext(request) {
       return null;
     }
 
-    const data = response.json || JSON.parse(response.text || "{}");
-    const current = data && typeof data.current === "object" ? data.current : {};
+    const data = toRecord(response.json || JSON.parse(response.text || "{}"));
+    const current = toRecord(data.current);
     const activityWeather = mapOpenMeteoWeatherToActivityContext(current.weather_code, current.temperature_2m);
 
     if (!activityWeather) {
@@ -1541,7 +1768,7 @@ async function fetchOpenMeteoActivityWeatherContext(request) {
   }
 }
 
-function buildOpenMeteoActivityWeatherUrl(request) {
+function buildOpenMeteoActivityWeatherUrl(request: ActivityWeatherRequest): string {
   const params = new URLSearchParams({
     latitude: String(request.latitude),
     longitude: String(request.longitude),
@@ -2475,8 +2702,8 @@ function normalizeMaxScanDurationSeconds(value) {
   return Math.max(seconds, MIN_MAX_SCAN_DURATION_SECONDS);
 }
 
-function normalizeScanState(value) {
-  const state = value && typeof value === "object" ? value : {};
+function normalizeScanState(value: unknown): ScanState {
+  const state = toRecord(value);
 
   return {
     isScanRunning: state.isScanRunning === true,
@@ -2494,8 +2721,8 @@ function normalizeScanState(value) {
   };
 }
 
-function getGitSheetMetadata(gitSheet) {
-  const sheet = gitSheet && typeof gitSheet === "object" ? gitSheet : {};
+function getGitSheetMetadata(gitSheet: unknown): GitSheetMetadata {
+  const sheet = toRecord(gitSheet);
 
   return {
     scanCompletedAt: formatScalar(sheet.scanCompletedAt || sheet.generatedAt),
@@ -2510,7 +2737,7 @@ function getGitSheetMetadata(gitSheet) {
   };
 }
 
-function formatCompletedScanStatus(metadata) {
+function formatCompletedScanStatus(metadata: GitSheetMetadata): string {
   if (metadata.timedOut) {
     return "completed with timeout";
   }
@@ -2522,7 +2749,7 @@ function formatCompletedScanStatus(metadata) {
   return "completed";
 }
 
-function formatManualScanNotice(gitSheet, outputPath) {
+function formatManualScanNotice(gitSheet: unknown, outputPath: string): string {
   const metadata = getGitSheetMetadata(gitSheet);
   const duration = formatDurationMs(metadata.durationMs);
 
@@ -2535,8 +2762,8 @@ function formatManualScanNotice(gitSheet, outputPath) {
   ].join(" · ");
 }
 
-function formatScanStateDuration(scanState) {
-  const durationMs = toNumber(scanState && scanState.lastScanDurationMs);
+function formatScanStateDuration(scanState: ScanState): string {
+  const durationMs = toNumber(scanState.lastScanDurationMs);
   return durationMs > 0 ? formatDurationMs(durationMs) : "Not available";
 }
 
@@ -2563,7 +2790,7 @@ function formatTimestampForSettings(value) {
   return formatGeneratedAt(text);
 }
 
-function migrateConfiguredPaths(savedSettings) {
+function migrateConfiguredPaths(savedSettings: UnknownRecord): ConfiguredPaths {
   const hasSplitSettings = hasOwn(savedSettings, "scanRoots") || hasOwn(savedSettings, "trackedRepoPaths");
 
   if (hasSplitSettings) {
@@ -2573,8 +2800,8 @@ function migrateConfiguredPaths(savedSettings) {
     };
   }
 
-  const scanRoots = [];
-  const trackedRepoPaths = [];
+  const scanRoots: string[] = [];
+  const trackedRepoPaths: string[] = [];
 
   for (const configuredPath of normalizeRepoPaths(savedSettings.repoPaths)) {
     if (hasGitMetadata(configuredPath)) {
@@ -2590,12 +2817,13 @@ function migrateConfiguredPaths(savedSettings) {
   };
 }
 
-function discoverGitRepositories(scanRoots, options = {}) {
+function discoverGitRepositories(scanRoots: unknown, options: DiscoveryOptions = {}): DiscoveryResult {
   const roots = normalizeRepoPaths(scanRoots);
-  const repositories = [];
-  const warnings = [];
+  const repositories: string[] = [];
+  const warnings: string[] = [];
   const maxDepth = Math.max(0, Math.floor(toNumber(options.maxDepth) || DEFAULT_DISCOVERY_DEPTH));
   const deadlineMs = Date.now() + normalizeMaxScanDurationSeconds(options.maxDurationSeconds) * 1000;
+  const skipFolderNames = getDiscoverySkipFolderNames(options.configDir);
   let visitedDirectoryCount = 0;
 
   for (const root of roots) {
@@ -2631,6 +2859,9 @@ function discoverGitRepositories(scanRoots, options = {}) {
       }
 
       const current = stack.pop();
+      if (!current) {
+        continue;
+      }
       visitedDirectoryCount += 1;
 
       if (hasGitMetadata(current.folderPath)) {
@@ -2651,7 +2882,7 @@ function discoverGitRepositories(scanRoots, options = {}) {
       }
 
       for (const entry of entries) {
-        if (!entry.isDirectory() || entry.isSymbolicLink() || shouldSkipDiscoveryFolder(entry.name)) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || shouldSkipDiscoveryFolder(entry.name, skipFolderNames)) {
           continue;
         }
 
@@ -2667,6 +2898,23 @@ function discoverGitRepositories(scanRoots, options = {}) {
     repositories: normalizeRepoPaths(repositories),
     warnings,
   };
+}
+
+function getDiscoverySkipFolderNames(configDir: unknown): Set<string> {
+  const skipFolderNames = new Set(DISCOVERY_SKIP_FOLDER_NAMES);
+  const configDirName = getConfigDirFolderName(configDir);
+
+  if (configDirName) {
+    skipFolderNames.add(configDirName);
+  }
+
+  return skipFolderNames;
+}
+
+function getConfigDirFolderName(configDir: unknown): string {
+  const normalizedConfigDir = normalizeFolderPath(configDir).toLowerCase();
+  const parts = normalizedConfigDir.split("/").filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : "";
 }
 
 function validateTrackedGitRepo(repoPath) {
@@ -2689,7 +2937,7 @@ function hasGitMetadata(repoPath) {
   }
 }
 
-function shouldSkipDiscoveryFolder(name) {
+function shouldSkipDiscoveryFolder(name: unknown, skipFolderNames: Set<string> = DISCOVERY_SKIP_FOLDER_NAMES): boolean {
   const normalizedName = String(name || "").trim().toLowerCase();
 
   if (!normalizedName) {
@@ -2700,7 +2948,7 @@ function shouldSkipDiscoveryFolder(name) {
     return true;
   }
 
-  return DISCOVERY_SKIP_FOLDER_NAMES.has(normalizedName);
+  return skipFolderNames.has(normalizedName);
 }
 
 function mergeUniquePaths(existingPaths, newPaths) {
@@ -2723,10 +2971,10 @@ function isDriveRoot(repoPath) {
   return normalizedPath === rootPath;
 }
 
-function normalizeRepoPaths(value) {
+function normalizeRepoPaths(value: unknown): string[] {
   const rawPaths = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
-  const seen = new Set();
-  const repoPaths = [];
+  const seen = new Set<string>();
+  const repoPaths: string[] = [];
 
   for (const rawPath of rawPaths) {
     const repoPath = normalizeLocalPath(rawPath);
@@ -2746,7 +2994,7 @@ function normalizeRepoPaths(value) {
   return repoPaths;
 }
 
-function normalizeLocalPath(value) {
+function normalizeLocalPath(value: unknown): string {
   let text = String(value || "").trim();
   if (!text) {
     return "";
@@ -2761,7 +3009,7 @@ function normalizeLocalPath(value) {
   }
 }
 
-function validateLocalDirectory(repoPath) {
+function validateLocalDirectory(repoPath: string): string {
   try {
     const stats = fs.statSync(repoPath);
     return stats.isDirectory() ? "" : "Path is not a folder.";
@@ -2770,20 +3018,22 @@ function validateLocalDirectory(repoPath) {
   }
 }
 
-function formatRepoPathsForSettings(value) {
+function formatRepoPathsForSettings(value: unknown): string {
   return normalizeRepoPaths(value).join("\n");
 }
 
-function formatGitFailure(repoPath, error) {
+function formatGitFailure(repoPath: string, error: unknown): string {
   return `Could not scan ${formatLocalPath(repoPath)}: ${formatGitError(error)}`;
 }
 
-function formatGitError(error) {
-  if (error && error.code === "ENOENT") {
+function formatGitError(error: unknown): string {
+  const gitError = toRecord(error);
+
+  if (gitError.code === "ENOENT") {
     return "Git is not available to Obsidian. Install Git or make sure Git is in PATH.";
   }
 
-  const stderr = String((error && error.stderr) || "").trim();
+  const stderr = String(gitError.stderr || "").trim();
   if (stderr) {
     if (/not a git repository/i.test(stderr)) {
       return "This path is not a Git repository. Use Discover repositories if it is a parent folder.";
@@ -2792,7 +3042,7 @@ function formatGitError(error) {
     return stderr.split(/\r?\n/)[0].trim();
   }
 
-  const message = String((error && error.message) || "").trim();
+  const message = String(gitError.message || "").trim();
   if (/not a git repository/i.test(message)) {
     return "This path is not a Git repository. Use Discover repositories if it is a parent folder.";
   }
@@ -2800,33 +3050,33 @@ function formatGitError(error) {
   return message || "Git command failed.";
 }
 
-function inferRepoName(repoPath) {
+function inferRepoName(repoPath: string): string {
   return path.basename(repoPath) || formatLocalPath(repoPath);
 }
 
-function formatLocalPath(value) {
+function formatLocalPath(value: unknown): string {
   return String(value || "").replace(/\\/g, "/");
 }
 
-function joinVaultPath(...parts) {
+function joinVaultPath(...parts: unknown[]): string {
   return normalizePath(parts.map((part) => String(part || "").trim()).filter(Boolean).join("/"));
 }
 
-function hasOwn(object, key) {
+function hasOwn(object: unknown, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
-function getFolderPart(path) {
-  const index = path.lastIndexOf("/");
-  return index === -1 ? "" : path.slice(0, index);
+function getFolderPart(vaultPath: string): string {
+  const index = vaultPath.lastIndexOf("/");
+  return index === -1 ? "" : vaultPath.slice(0, index);
 }
 
-function sanitizeFolderSetting(value, fallback) {
+function sanitizeFolderSetting(value: unknown, fallback: string): string {
   const normalized = normalizeFolderPath(value);
   return normalized || fallback;
 }
 
-function normalizeFolderPath(value) {
+function normalizeFolderPath(value: unknown): string {
   return normalizePath(String(value || "").trim().replace(/^\/+|\/+$/g, ""));
 }
 
